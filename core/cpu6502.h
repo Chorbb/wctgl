@@ -24,6 +24,7 @@ typedef struct Cpu {
     int      nmi_pending;     /* фронт NMI ждёт обработки */
     int      irq_line;        /* уровень IRQ (0/1) */
     int      jammed;          /* процессор встал на недопустимой инструкции */
+    int      access_offset;   /* на каком такте инструкции идёт обращение к регистрам (для PPU) */
     cpu_read_fn  read;
     cpu_write_fn write;
     void    *ctx;

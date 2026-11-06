@@ -73,7 +73,12 @@ int main(int argc, char **argv) {
     int start = -1;
     for (int k = 0; k < nrec; k++) {
         if (ver == 2 && (recs[k].flags & 2)) start = k;
-        if (ver == 3 && (recs[k].flags & 4) && k > 0) { start = k - 1; break; }
+        /* v3: перезагрузку видно по сбросу счётчика тактов процессора */
+        if (ver == 3 && k > 0) {
+            uint32_t c0 = (uint32_t)(recs[k-1].cpu[8] | (recs[k-1].cpu[9] << 8) | (recs[k-1].cpu[10] << 16) | ((uint32_t)recs[k-1].cpu[11] << 24));
+            uint32_t c1 = (uint32_t)(recs[k].cpu[8] | (recs[k].cpu[9] << 8) | (recs[k].cpu[10] << 16) | ((uint32_t)recs[k].cpu[11] << 24));
+            if (c1 < c0) { start = k - 1; break; }
+        }
     }
     if (start < 0) { fprintf(stderr, "no reset point in log\n"); return 2; }
     int start_line = getenv("TGL_START_LINE") ? atoi(getenv("TGL_START_LINE")) : 0;
@@ -82,9 +87,13 @@ int main(int argc, char **argv) {
     if (err) { fprintf(stderr, "rom load error %d\n", err); return 2; }
     memcpy(n->ram, recs[start].ram, 2048);
     nes_reset(n);
+    n->dot_offset = getenv("TGL_DOT_OFFSET") ? atoi(getenv("TGL_DOT_OFFSET")) : 0;
+    n->nmi_delay = getenv("TGL_NMI_DELAY") ? atoi(getenv("TGL_NMI_DELAY")) : 0;
+    if (getenv("TGL_DMC_PHASE")) n->dmc.timer = atoi(getenv("TGL_DMC_PHASE"));
+    if (getenv("TGL_DMC_STALL")) n->dmc.stall_cost = atoi(getenv("TGL_DMC_STALL"));
     n->ppu.scanline = start_line;   /* где была развёртка в момент перезагрузки (калибруется) */
 
-    int first_bad = -1, bad_frames = 0, compared = 0;
+    int first_bad = -1, bad_frames = 0, compared = 0, run = 0, persistent = -1;
     for (int k = start + 1; k < nrec && compared < max_frames; k++) {
         n->pad_state = recs[k].input;
         nes_run_frame(n);
@@ -95,6 +104,19 @@ int main(int argc, char **argv) {
             if (n->ram[a] != recs[k].ram[a]) diffs++;
         }
         if (png_every && (compared % png_every == 0)) save_ppm(n, png_dir, recs[k].frame);
+        if (getenv("TGL_TRACE") && compared <= atoi(getenv("TGL_TRACE")))
+        {
+            printf("  frame %u: %d bytes differ, port pc=%04X orig pc=%04X", recs[k].frame, diffs, n->cpu.pc,
+                   recs[k].cpu ? (recs[k].cpu[0] | (recs[k].cpu[1] << 8)) : 0);
+            int sh = 0;
+            for (int a = 0; a < 2048 && sh < 6; a++) {
+                if (a >= 0x100 && a < 0x200) continue;
+                if (n->ram[a] != recs[k].ram[a]) { printf("  $%03X:%02X/%02X", a, n->ram[a], recs[k].ram[a]); sh++; }
+            }
+            printf("\n");
+        }
+        run = diffs ? run + 1 : 0;
+        if (run == 5 && persistent < 0) persistent = compared - 4;
         if (diffs) {
             bad_frames++;
             if (first_bad < 0) {
@@ -117,6 +139,7 @@ int main(int argc, char **argv) {
     }
     printf("compared %d frames, mismatched %d, cpu jammed=%d, hooks=%llu\n",
            compared, bad_frames, n->cpu.jammed, (unsigned long long)n->hook_calls);
+    if (persistent >= 0) printf("PERSISTENT DIVERGENCE from frame %d after reset\n", persistent);
     if (first_bad < 0) printf("ALL FRAMES MATCH\n");
     return first_bad < 0 ? 0 : 1;
 }

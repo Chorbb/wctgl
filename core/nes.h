@@ -19,16 +19,37 @@ typedef struct Nes Nes;
  * (обычно — выполнить RTS). */
 typedef void (*nes_hook_fn)(Nes *n);
 
+/* Канал DMC звукового чипа. TGL использует его прерывание, чтобы отделить
+ * нижнюю панель HUD от игрового поля, поэтому тайминг важен. Сам звук пока не выводим. */
+typedef struct Dmc {
+    int irq_enabled, loop, irq_flag;
+    int period, timer;          /* период в тактах CPU и счётчик */
+    uint16_t sample_addr, cur_addr;
+    int sample_len, bytes_left;
+    int buffer_full;
+    uint8_t buffer, shift;
+    int bits_left;
+    int silence;
+    int stall;                  /* такты, которые нужно отнять у процессора на подкачку */
+    int stall_cost;             /* сколько тактов стоит одна подкачка (калибровка, обычно 4) */
+} Dmc;
+
 typedef struct Ppu {
     uint8_t ctrl, mask, status, oam_addr;
     uint16_t v, t;           /* «loopy»-регистры адреса и прокрутки */
     uint8_t x, w;            /* тонкая прокрутка по X и переключатель записи */
     uint8_t read_buffer;
+    uint8_t io_latch;        /* «открытая шина» PPU: последнее значение на шине регистров */
     uint8_t oam[256];
     uint8_t nt[2048];        /* память фона (2 экрана) */
     uint8_t pal[32];
     int scanline;            /* 0..261 */
+    int dot;                 /* 0..340 */
+    uint64_t time;           /* сколько точек (dot) прошло с перезагрузки */
+    int frame_ended;         /* вошли в строку 240: кадр закончен */
+    int hit_x;               /* где на текущей строке будет попадание спрайта 0 (-1 = нет) */
     int frame_odd;
+    int skip_vblank;         /* после перезагрузки первый vblank не выставляется (как в Mesen) */
     uint8_t framebuffer[NES_SCREEN_W * NES_SCREEN_H];  /* индексы палитры NES (0..63) */
 } Ppu;
 
@@ -40,11 +61,15 @@ struct Nes {
     int prg_banks;           /* количество банков по 16 КБ */
     int bank;                /* текущий банк в $8000-$BFFF */
     uint8_t chr[8192];       /* CHR-RAM */
+    Dmc dmc;
     uint8_t pad_state;       /* кнопки: A B Select Start Up Down Left Right = биты 0..7 */
     uint8_t pad_shift;
     int pad_strobe;
     uint64_t frame;
-    double cycle_debt;       /* дробная часть тактов на строку (113.667) */
+    int dot_offset;          /* сдвиг PPU относительно CPU в точках (калибровка по Mesen) */
+    int nmi_delay;           /* поправка момента срабатывания NMI в точках (калибровка) */
+    int nmi_line;            /* NMI выставлен и ещё не обработан */
+    uint64_t nmi_time;       /* когда выставлен NMI (в точках PPU) */
     nes_hook_fn hooks[0x10000];       /* перехват по адресу; NULL = нет */
     int hook_bank[0x10000];  /* к какому банку относится перехват в $8000-$BFFF (-1 = любой) */
     uint64_t hook_calls;     /* сколько раз сработали переведённые процедуры */

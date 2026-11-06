@@ -14,6 +14,12 @@ const uint32_t NES_PALETTE[64] = {
     0xE4E594,0xCFEF96,0xBDF4AB,0xB3F3CC,0xB5EBF2,0xB8B8B8,0x000000,0x000000,
 };
 
+static void ppu_advance_to(Nes *n, uint64_t target);
+static uint64_t cpu_now(Nes *n) {
+    int64_t t = (int64_t)(n->cpu.cycles + (uint64_t)n->cpu.access_offset) * 3 + n->dot_offset;
+    return t < 0 ? 0 : (uint64_t)t;
+}
+
 /* ---------------------------------------------------------------- память PPU */
 
 static uint8_t ppu_mem_read(Nes *n, uint16_t a) {
@@ -40,33 +46,36 @@ static uint8_t ppu_reg_read(Nes *n, int r) {
     Ppu *p = &n->ppu;
     switch (r) {
     case 2: {
-        uint8_t v = (uint8_t)((p->status & 0xE0) | (p->read_buffer & 0x1F));
+        uint8_t v = (uint8_t)((p->status & 0xE0) | (p->io_latch & 0x1F));
         p->status &= 0x7F;
         p->w = 0;
+        p->io_latch = v;
         return v;
     }
-    case 4: return p->oam[p->oam_addr];
+    case 4: p->io_latch = p->oam[p->oam_addr]; return p->io_latch;
     case 7: {
         uint16_t a = p->v & 0x3FFF;
         uint8_t v;
         if (a < 0x3F00) { v = p->read_buffer; p->read_buffer = ppu_mem_read(n, a); }
         else { v = ppu_mem_read(n, a); p->read_buffer = ppu_mem_read(n, a - 0x1000); }
         p->v = (uint16_t)(p->v + ((p->ctrl & 4) ? 32 : 1));
+        p->io_latch = v;
         return v;
     }
     }
-    return 0;
+    return p->io_latch;   /* регистры только для записи возвращают содержимое шины */
 }
 
 static void ppu_reg_write(Nes *n, int r, uint8_t v) {
     Ppu *p = &n->ppu;
+    p->io_latch = v;
     switch (r) {
     case 0: {
         int was = p->ctrl & 0x80;
         p->ctrl = v;
         p->t = (uint16_t)((p->t & 0xF3FF) | ((v & 3) << 10));
         /* включение NMI во время vblank сразу даёт прерывание */
-        if (!was && (v & 0x80) && (p->status & 0x80)) cpu_nmi(&n->cpu);
+        if (!was && (v & 0x80) && (p->status & 0x80)) { n->nmi_line = 1; n->nmi_time = p->time; }
         break;
     }
     case 1: p->mask = v; break;
@@ -87,19 +96,69 @@ static void ppu_reg_write(Nes *n, int r, uint8_t v) {
     }
 }
 
+/* ---------------------------------------------------------------- канал DMC */
+
+static const int DMC_RATES[16] = { 428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54 };
+
+static void dmc_fetch(Nes *n, int is_load) {
+    Dmc *d = &n->dmc;
+    if (d->buffer_full || d->bytes_left == 0) return;
+    d->buffer = nes_read(n, d->cur_addr);
+    d->buffer_full = 1;
+    d->stall += is_load ? d->stall_cost - 1 : d->stall_cost;  /* первая подкачка 3 такта, остальные 4 */
+    d->cur_addr = d->cur_addr == 0xFFFF ? 0x8000 : (uint16_t)(d->cur_addr + 1);
+    if (--d->bytes_left == 0) {
+        if (d->loop) { d->cur_addr = d->sample_addr; d->bytes_left = d->sample_len; }
+        else if (d->irq_enabled) d->irq_flag = 1;
+    }
+}
+
+static void dmc_clock(Nes *n, int cycles) {
+    Dmc *d = &n->dmc;
+    d->timer -= cycles;
+    while (d->timer <= 0) {
+        d->timer += d->period;
+        if (d->bits_left == 0) {
+            d->bits_left = 8;
+            if (d->buffer_full) { d->shift = d->buffer; d->buffer_full = 0; d->silence = 0; dmc_fetch(n, 0); }
+            else d->silence = 1;
+        }
+        d->bits_left--;
+    }
+}
+
+static void dmc_write(Nes *n, uint16_t a, uint8_t v) {
+    Dmc *d = &n->dmc;
+    switch (a) {
+    case 0x4010:
+        d->irq_enabled = v & 0x80; d->loop = v & 0x40; d->period = DMC_RATES[v & 15];
+        if (!d->irq_enabled) d->irq_flag = 0;
+        break;
+    case 0x4012: d->sample_addr = (uint16_t)(0xC000 | (v << 6)); break;
+    case 0x4013: d->sample_len = (v << 4) + 1; break;
+    case 0x4015:
+        d->irq_flag = 0;
+        if (v & 0x10) {
+            if (d->bytes_left == 0) { d->cur_addr = d->sample_addr; d->bytes_left = d->sample_len; dmc_fetch(n, 1); }
+        } else d->bytes_left = 0;
+        break;
+    }
+}
+
 /* ---------------------------------------------------------------- шина процессора */
 
 static int dma_cycles;   /* такты, украденные OAM DMA во время последней инструкции */
 
 uint8_t nes_read(Nes *n, uint16_t a) {
     if (a < 0x2000) return n->ram[a & 0x7FF];
-    if (a < 0x4000) return ppu_reg_read(n, a & 7);
+    if (a < 0x4000) { ppu_advance_to(n, cpu_now(n)); return ppu_reg_read(n, a & 7); }
     if (a == 0x4016) {
         uint8_t bit;
         if (n->pad_strobe) bit = n->pad_state & 1;
         else { bit = n->pad_shift & 1; n->pad_shift = (uint8_t)((n->pad_shift >> 1) | 0x80); }
         return (uint8_t)(0x40 | bit);
     }
+    if (a == 0x4015) return (uint8_t)((n->dmc.irq_flag ? 0x80 : 0) | (n->dmc.bytes_left ? 0x10 : 0));
     if (a == 0x4017) return 0x40;
     if (a < 0x8000) return 0;
     if (a < 0xC000) return n->prg[n->bank * 0x4000 + (a - 0x8000)];
@@ -108,7 +167,7 @@ uint8_t nes_read(Nes *n, uint16_t a) {
 
 void nes_write(Nes *n, uint16_t a, uint8_t v) {
     if (a < 0x2000) { n->ram[a & 0x7FF] = v; return; }
-    if (a < 0x4000) { ppu_reg_write(n, a & 7, v); return; }
+    if (a < 0x4000) { ppu_advance_to(n, cpu_now(n)); ppu_reg_write(n, a & 7, v); return; }
     if (a == 0x4014) {
         uint16_t base = (uint16_t)(v << 8);
         for (int i = 0; i < 256; i++)
@@ -123,7 +182,8 @@ void nes_write(Nes *n, uint16_t a, uint8_t v) {
         return;
     }
     if (a >= 0x8000) { n->bank = v & (n->prg_banks - 1); return; }
-    /* APU и прочее пока игнорируем */
+    if (a == 0x4010 || a == 0x4012 || a == 0x4013 || a == 0x4015) { dmc_write(n, a, v); return; }
+    /* остальной звук пока игнорируем */
 }
 
 static uint8_t bus_read(void *ctx, uint16_t a) { return nes_read((Nes *)ctx, a); }
@@ -151,6 +211,17 @@ void nes_reset(Nes *n) {
     n->ppu.ctrl = n->ppu.mask = 0;
     n->ppu.w = 0;
     n->ppu.scanline = 0;
+    n->ppu.dot = 0;
+    n->ppu.time = 0;
+    n->ppu.hit_x = -1;
+    n->nmi_line = 0;
+    n->ppu.skip_vblank = 1;
+    memset(&n->dmc, 0, sizeof n->dmc);
+    n->dmc.period = DMC_RATES[0];
+    n->dmc.timer = 300;          /* фаза таймера DMC после перезагрузки (подобрана по записи) */
+    n->dmc.stall_cost = 4;
+    n->dmc.sample_addr = 0xC000;
+    n->dmc.sample_len = 1;
     cpu_reset(&n->cpu);
 }
 
@@ -226,7 +297,7 @@ static void render_line(Nes *n, int y) {
                 int c = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
                 if (!c) continue;
                 if (px < 8 && !(p->mask & 0x04)) continue;
-                if (i == 0 && bg_opaque[px] && px != 255) p->status |= 0x40;  /* попадание спрайта 0 */
+                if (i == 0 && bg_opaque[px] && px != 255 && (p->hit_x < 0 || px < p->hit_x)) p->hit_x = px;  /* попадание спрайта 0 */
                 if (drawn[px]) continue;
                 drawn[px] = 1;
                 if ((attr & 0x20) && bg_opaque[px]) continue;              /* спрайт за фоном */
@@ -246,65 +317,88 @@ static void inc_y(Ppu *p) {
     p->v = (uint16_t)((p->v & ~0x03E0) | (y << 5));
 }
 
-/* ---------------------------------------------------------------- тайминг */
+/* ---------------------------------------------------------------- тайминг
+ * PPU продвигается по точкам (dot) и догоняет процессор перед каждым обращением
+ * к своим регистрам и после каждой инструкции. Так прерывание кадра (NMI) приходит
+ * на ту же инструкцию, что и в оригинале, — от этого зависит генератор случайных чисел игры. */
 
-static void run_cycles(Nes *n, double cycles) {
-    n->cycle_debt += cycles;
-    while (n->cycle_debt > 0) {
-        uint16_t pc = n->cpu.pc;
-        nes_hook_fn h = n->hooks[pc];
-        if (h && (pc < 0x8000 || pc >= 0xC000 || n->hook_bank[pc] < 0 || n->hook_bank[pc] == n->bank)) {
-            n->hook_calls++;
-            h(n);
-            int c = n->hook_cycles[pc] > 0 ? n->hook_cycles[pc] : 50;
-            n->cpu.cycles += (uint64_t)c;
-            n->cycle_debt -= c;
-            continue;
-        }
-        dma_cycles = 0;
-        int c = cpu_step(&n->cpu);
-        n->cpu.cycles += (uint64_t)dma_cycles;
-        n->cycle_debt -= c + dma_cycles;
-    }
-}
-
-#define CYCLES_PER_LINE (341.0 / 3.0)
-#define CYCLES_TO_DOT257 (257.0 / 3.0)
-
-/* Одна строка развёртки. */
-static void run_line(Nes *n) {
+static void ppu_advance_to(Nes *n, uint64_t target) {
     Ppu *p = &n->ppu;
-    int sl = p->scanline;
-    if (sl < 240) {
-        if (rendering(p)) render_line(n, sl);
-        else for (int x = 0; x < NES_SCREEN_W; x++) p->framebuffer[sl * NES_SCREEN_W + x] = p->pal[0];
-        run_cycles(n, CYCLES_TO_DOT257);
-        if (rendering(p)) {
-            inc_y(p);
-            p->v = (uint16_t)((p->v & ~0x041F) | (p->t & 0x041F));
+    while (p->time < target) {
+        int sl = p->scanline, d = p->dot;
+        int ren = rendering(p);
+        if (sl < 240) {
+            if (d == 1) {
+                p->hit_x = -1;
+                if (ren) render_line(n, sl);
+                else for (int x = 0; x < NES_SCREEN_W; x++) p->framebuffer[sl * NES_SCREEN_W + x] = p->pal[0];
+            } else if (p->hit_x >= 0 && d == p->hit_x + 2) {
+                p->status |= 0x40;
+                p->hit_x = -1;
+            }
+            if (ren && d == 256) inc_y(p);
+            if (ren && d == 257) p->v = (uint16_t)((p->v & ~0x041F) | (p->t & 0x041F));
+        } else if (sl == 241 && d == 1) {
+            if (p->skip_vblank) p->skip_vblank = 0;
+            else {
+                p->status |= 0x80;
+                if (p->ctrl & 0x80) { n->nmi_line = 1; n->nmi_time = p->time; }
+            }
+        } else if (sl == 261) {
+            if (d == 1) p->status &= 0x1F;     /* сброс vblank, спрайта 0 и переполнения */
+            if (ren && d == 257) p->v = (uint16_t)((p->v & ~0x041F) | (p->t & 0x041F));
+            if (ren && d == 280) p->v = (uint16_t)((p->v & ~0x7BE0) | (p->t & 0x7BE0));
         }
-        run_cycles(n, CYCLES_PER_LINE - CYCLES_TO_DOT257);
-    } else if (sl == 241) {
-        p->status |= 0x80;
-        if (p->ctrl & 0x80) cpu_nmi(&n->cpu);
-        run_cycles(n, CYCLES_PER_LINE);
-    } else if (sl == 261) {
-        p->status &= 0x1F;     /* сброс vblank, спрайта 0 и переполнения */
-        run_cycles(n, CYCLES_TO_DOT257);
-        if (rendering(p)) {
-            p->v = (uint16_t)((p->v & ~0x041F) | (p->t & 0x041F));
-            p->v = (uint16_t)((p->v & ~0x7BE0) | (p->t & 0x7BE0));
+        p->time++;
+        d++;
+        if (sl == 261 && d == 340 && ren && p->frame_odd) d = 341;   /* нечётный кадр короче на точку */
+        if (d >= 341) {
+            d = 0;
+            sl = (sl + 1) % 262;
+            if (sl == 0) p->frame_odd ^= 1;
+            if (sl == 240) p->frame_ended = 1;
         }
-        run_cycles(n, CYCLES_PER_LINE - CYCLES_TO_DOT257);
-    } else {
-        run_cycles(n, CYCLES_PER_LINE);
+        p->dot = d;
+        p->scanline = sl;
     }
-    p->scanline = (sl + 1) % 262;
 }
 
-/* Кадр заканчивается в начале vblank (строка 241): в этот момент
- * снимаем память для сверки, как скрипт в Mesen. */
+static void step(Nes *n) {
+    /* NMI, выставленный до последнего такта предыдущей инструкции, срабатывает сейчас */
+    if (n->nmi_line) {
+        int64_t limit = (int64_t)(n->cpu.cycles - 1) * 3 + n->dot_offset + n->nmi_delay;
+        if ((int64_t)n->nmi_time <= limit) { n->nmi_line = 0; cpu_nmi(&n->cpu); }
+    }
+    uint16_t pc = n->cpu.pc;
+    nes_hook_fn h = n->hooks[pc];
+    if (h && !n->cpu.nmi_pending &&
+        (pc < 0x8000 || pc >= 0xC000 || n->hook_bank[pc] < 0 || n->hook_bank[pc] == n->bank)) {
+        n->hook_calls++;
+        h(n);
+        n->cpu.cycles += (uint64_t)(n->hook_cycles[pc] > 0 ? n->hook_cycles[pc] : 50);
+    } else {
+        dma_cycles = 0;
+        uint64_t before = n->cpu.cycles;
+        cpu_step(&n->cpu);
+        n->cpu.cycles += (uint64_t)dma_cycles;
+        dmc_clock(n, (int)(n->cpu.cycles - before));
+    }
+    /* подкачка DMC отнимает такты у процессора */
+    while (n->dmc.stall) {
+        int st = n->dmc.stall;
+        n->dmc.stall = 0;
+        n->cpu.cycles += (uint64_t)st;
+        dmc_clock(n, st);
+    }
+    n->cpu.irq_line = n->dmc.irq_flag;
+    n->cpu.access_offset = 0;
+    ppu_advance_to(n, cpu_now(n));
+}
+
+/* Кадр заканчивается в начале строки 240 (после видимой части), как событие
+ * endFrame в Mesen: в этот момент снимаем память для сверки. */
 void nes_run_frame(Nes *n) {
-    do { run_line(n); } while (n->ppu.scanline != 241);
+    n->ppu.frame_ended = 0;
+    while (!n->ppu.frame_ended) step(n);
     n->frame++;
 }

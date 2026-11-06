@@ -57,6 +57,7 @@ void cpu_reset(Cpu *c) {
 void cpu_nmi(Cpu *c) { c->nmi_pending = 1; }
 
 static int interrupt(Cpu *c, uint16_t vector, int brk) {
+    c->access_offset = 0;
     cpu_push(c, (uint8_t)(c->pc >> 8));
     cpu_push(c, (uint8_t)c->pc);
     cpu_push(c, (uint8_t)((c->p | FLAG_U) | (brk ? FLAG_B : 0)) & (uint8_t)(brk ? 0xFF : ~FLAG_B));
@@ -127,6 +128,7 @@ int cpu_step(Cpu *c) {
 
     uint8_t op = fetch(c);
     int cyc = CYC[op], cross = 0;
+    c->access_offset = cyc - 1;   /* чтение/запись регистров обычно на последнем такте */
     uint16_t a;
     uint8_t m;
 
