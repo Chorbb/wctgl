@@ -1,7 +1,10 @@
-/* nes.h — «приставка» для порта: память, картридж UNROM, видеочип (PPU), геймпад.
+/* nes.h — «приставка» для порта: память, картридж UNROM, видеочип (PPU),
+ * канал DMC, геймпад.
  *
  * Это не эмулятор общего назначения: он покрывает ровно то, что нужно The Guardian Legend
  * (маппер 2 / UNROM, CHR-RAM, вертикальное зеркалирование), и ничего лишнего.
+ * Тайминг потактовый: каждое обращение процессора к шине продвигает остальные
+ * устройства на один такт (см. bus_read/bus_write в nes.c).
  */
 #ifndef NES_CORE_H
 #define NES_CORE_H
@@ -30,8 +33,9 @@ typedef struct Dmc {
     uint8_t buffer, shift;
     int bits_left;
     int silence;
-    int stall;                  /* такты, которые нужно отнять у процессора на подкачку */
-    int stall_cost;             /* сколько тактов стоит одна подкачка (калибровка, обычно 4) */
+    int dma_pending;            /* нужна подкачка байта (процессор остановится на ближайшем чтении) */
+    int load_delay;             /* после записи в $4015 подкачка начинается через пару тактов */
+    int dbg_fetches, dbg_irqs;  /* отладка: подкачки и прерывания за кадр */
 } Dmc;
 
 typedef struct Ppu {
@@ -47,8 +51,10 @@ typedef struct Ppu {
     int dot;                 /* 0..340 */
     uint64_t time;           /* сколько точек (dot) прошло с перезагрузки */
     int frame_ended;         /* вошли в строку 240: кадр закончен */
+    uint64_t frame_end_time; /* точная точка (dot) конца кадра */
     int hit_x;               /* где на текущей строке будет попадание спрайта 0 (-1 = нет) */
     int frame_odd;
+    int suppress_vbl;        /* чтение $2002 перед самым выставлением флага: в этом кадре флага не будет */
     int skip_vblank;         /* после перезагрузки первый vblank не выставляется (как в Mesen) */
     uint8_t framebuffer[NES_SCREEN_W * NES_SCREEN_H];  /* индексы палитры NES (0..63) */
 } Ppu;
@@ -56,34 +62,62 @@ typedef struct Ppu {
 struct Nes {
     Cpu cpu;
     Ppu ppu;
+    Dmc dmc;
     uint8_t ram[2048];
     uint8_t *prg;            /* PRG-ROM целиком */
     int prg_banks;           /* количество банков по 16 КБ */
     int bank;                /* текущий банк в $8000-$BFFF */
     uint8_t chr[8192];       /* CHR-RAM */
-    Dmc dmc;
     uint8_t pad_state;       /* кнопки: A B Select Start Up Down Left Right = биты 0..7 */
     uint8_t pad_shift;
     int pad_strobe;
     uint64_t frame;
-    int dot_offset;          /* сдвиг PPU относительно CPU в точках (калибровка по Mesen) */
-    int nmi_delay;           /* поправка момента срабатывания NMI в точках (калибровка) */
-    int nmi_line;            /* NMI выставлен и ещё не обработан */
-    uint64_t nmi_time;       /* когда выставлен NMI (в точках PPU) */
-    nes_hook_fn hooks[0x10000];       /* перехват по адресу; NULL = нет */
-    int hook_bank[0x10000];  /* к какому банку относится перехват в $8000-$BFFF (-1 = любой) */
+
+    int oam_dma_pending;     /* запись в $4014: копирование спрайтов на ближайшем чтении */
+    uint8_t oam_dma_page;
+
+    /* калибровка тайминга относительно Mesen */
+    int dot_offset;          /* сдвиг PPU относительно CPU в точках */
+    int access_split;        /* сколько точек такта PPU проходит после обращения к шине */
+    int apu_phase;           /* какие такты считаются «get» для подкачки DMC (0/1) */
+    int hit_delay;           /* через сколько точек после пикселя выставляется попадание спрайта 0 */
+    int frame_end_dot;       /* в какой точке строки 240 Mesen сообщает конец кадра (калибровка) */
+    int race_dot;            /* чтение $2002 в эту точку строки 241 «съедает» vblank (калибровка) */
+
+    /* состояние ровно в момент конца кадра (для сверки с Mesen, который
+     * снимает память посреди инструкции) */
+    int fe_captured;
+    uint16_t fe_pc;
+    uint64_t fe_cycle;
+    uint8_t fe_ram[2048];
+
+    struct NesHooks *hooks;  /* переведённые процедуры (общие для всех копий состояния) */
     uint64_t hook_calls;     /* сколько раз сработали переведённые процедуры */
-    int hook_cycles[0x10000];/* сколько тактов занимает оригинал (для тайминга) */
+    /* наблюдатель: вызывается перед инструкцией по адресу watch_pc, ничего не заменяя */
+    uint16_t watch_pc;
+    void (*watch_fn)(Nes *n);
+    void *user;
 };
+
+/* Таблица перехватов вынесена из Nes, чтобы состояние приставки можно было
+ * быстро копировать (сохранить/восстановить) — это нужно для сверки. */
+typedef struct NesHooks {
+    nes_hook_fn fn[0x10000];  /* перехват по адресу; NULL = нет */
+    int bank[0x10000];        /* к какому банку относится перехват в $8000-$BFFF (-1 = любой) */
+    int cycles[0x10000];      /* сколько тактов занимает оригинал (для тайминга) */
+} NesHooks;
 
 /* Загрузка ROM в формате iNES. Возвращает 0 при успехе. */
 int  nes_load_rom(Nes *n, const uint8_t *data, int size);
 void nes_reset(Nes *n);
-/* Выполнить один кадр: с начала видимой части до начала следующей. */
+/* Выполнить один кадр: до начала строки 240 (как endFrame в Mesen). */
 void nes_run_frame(Nes *n);
-/* Вспомогательные функции для переведённого кода. */
+/* Доступ к памяти без продвижения времени — для переведённого кода и отладки. */
 uint8_t nes_read(Nes *n, uint16_t addr);
 void    nes_write(Nes *n, uint16_t addr, uint8_t v);
+/* Продвинуть время на заданное число тактов (переведённый код вызывает,
+ * чтобы занять столько же тактов, сколько оригинал). */
+void    nes_idle_cycles(Nes *n, int cycles);
 void    nes_set_hook(Nes *n, int bank, uint16_t addr, nes_hook_fn fn);
 /* Палитра NES в RGB (64 цвета). */
 extern const uint32_t NES_PALETTE[64];
