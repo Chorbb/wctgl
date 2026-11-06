@@ -11,7 +11,7 @@
 #include <string.h>
 #include "../core/nes.h"
 
-typedef struct { uint32_t frame; uint8_t input, flags; const uint8_t *ram, *oam; } Rec;
+typedef struct { uint32_t frame; uint8_t input, flags; const uint8_t *cpu, *ram, *oam; } Rec;
 
 static uint8_t *read_file(const char *path, long *size) {
     FILE *f = fopen(path, "rb");
@@ -47,32 +47,42 @@ int main(int argc, char **argv) {
     int png_every = argc > 4 ? atoi(argv[4]) : 0;
     const char *png_dir = argc > 5 ? argv[5] : ".";
 
-    if (memcmp(log, "TGLLOG2\n", 8) != 0) { fprintf(stderr, "not a TGLLOG2 file\n"); return 2; }
+    int ver = 0;
+    if (memcmp(log, "TGLLOG2\n", 8) == 0) ver = 2;
+    if (memcmp(log, "TGLLOG3\n", 8) == 0) ver = 3;
+    if (!ver) { fprintf(stderr, "unknown log format\n"); return 2; }
+    int cpu_bytes = ver == 3 ? 12 : 0;
     int cap = 1 << 16, nrec = 0;
     Rec *recs = malloc(sizeof(Rec) * (size_t)cap);
     long i = 8;
-    while (i + 7 + 2048 + 256 <= log_size && log[i] == 'F') {
+    while (i + 7 + cpu_bytes + 2048 + 256 <= log_size && log[i] == 'F') {
         Rec r;
         r.frame = (uint32_t)(log[i + 1] | (log[i + 2] << 8) | (log[i + 3] << 16) | ((uint32_t)log[i + 4] << 24));
         r.input = log[i + 5]; r.flags = log[i + 6];
-        r.ram = log + i + 7; r.oam = log + i + 7 + 2048;
-        i += 7 + 2048 + 256 + ((r.flags & 1) ? 2048 : 0);
+        r.cpu = cpu_bytes ? log + i + 7 : NULL;
+        r.ram = log + i + 7 + cpu_bytes; r.oam = r.ram + 2048;
+        i += 7 + cpu_bytes + 2048 + 256 + ((r.flags & 1) ? 2048 : 0);
         if (i > log_size) break;
         if (nrec == cap) { cap *= 2; recs = realloc(recs, sizeof(Rec) * (size_t)cap); }
         recs[nrec++] = r;
     }
     printf("log: %d records\n", nrec);
 
-    /* ищем последний снимок перезагрузки: с него и начинаем */
+    /* v2: снимок в момент перезагрузки (флаг 2), сверка со следующего кадра.
+     * v3: флаг 4 = первый кадр после перезагрузки, память до неё — в предыдущей записи. */
     int start = -1;
-    for (int k = 0; k < nrec; k++) if (recs[k].flags & 2) start = k;
-    if (start < 0) { fprintf(stderr, "no reset snapshot in log\n"); return 2; }
-
+    for (int k = 0; k < nrec; k++) {
+        if (ver == 2 && (recs[k].flags & 2)) start = k;
+        if (ver == 3 && (recs[k].flags & 4) && k > 0) { start = k - 1; break; }
+    }
+    if (start < 0) { fprintf(stderr, "no reset point in log\n"); return 2; }
+    int start_line = getenv("TGL_START_LINE") ? atoi(getenv("TGL_START_LINE")) : 0;
     Nes *n = calloc(1, sizeof(Nes));
     int err = nes_load_rom(n, rom, (int)rom_size);
     if (err) { fprintf(stderr, "rom load error %d\n", err); return 2; }
     memcpy(n->ram, recs[start].ram, 2048);
     nes_reset(n);
+    n->ppu.scanline = start_line;   /* где была развёртка в момент перезагрузки (калибруется) */
 
     int first_bad = -1, bad_frames = 0, compared = 0;
     for (int k = start + 1; k < nrec && compared < max_frames; k++) {
@@ -89,8 +99,10 @@ int main(int argc, char **argv) {
             bad_frames++;
             if (first_bad < 0) {
                 first_bad = (int)recs[k].frame;
-                printf("FIRST MISMATCH at frame %u (%d bytes differ). pc=%04X bank=%d\n",
-                       recs[k].frame, diffs, n->cpu.pc, n->bank);
+                printf("FIRST MISMATCH at frame %u (%d after reset, %d bytes differ). port pc=%04X",
+                       recs[k].frame, compared, diffs, n->cpu.pc);
+                if (recs[k].cpu) printf(" original pc=%04X", recs[k].cpu[0] | (recs[k].cpu[1] << 8));
+                printf(" bank=%d\n", n->bank);
                 int shown = 0;
                 for (int a = 0; a < 2048 && shown < 24; a++) {
                     if (a >= 0x100 && a < 0x200) continue;
