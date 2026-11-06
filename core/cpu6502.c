@@ -24,9 +24,9 @@ static inline void WR(Cpu *c, uint16_t a, uint8_t v) {
     cpu_end_cycle(c);
 }
 
-/* Порядок увеличения PC важен только для сверки PC посреди инструкции с Mesen:
- * у кода операции PC растёт после чтения, у операндов — до (как в Mesen). */
-static inline uint8_t fetch(Cpu *c) { return RD(c, c->pc++); }
+/* PC растёт после такта чтения байта (как в Mesen). Это важно только для сверки PC
+ * посреди инструкции: кадр в Mesen кончается то до, то после обращения к шине. */
+static inline uint8_t fetch(Cpu *c) { uint8_t v = RD(c, c->pc); c->pc++; return v; }
 static inline uint8_t fetch_opcode(Cpu *c) { uint8_t v = RD(c, c->pc); c->pc++; return v; }
 static inline void dummy_pc(Cpu *c) { RD(c, c->pc); }
 

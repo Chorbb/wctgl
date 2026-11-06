@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
     if (err) { fprintf(stderr, "rom load error %d\n", err); return 2; }
     memcpy(n->ram, recs[start].ram, 2048);
     nes_reset(n);
-    if (getenv("TGL_DOT_OFFSET")) n->dot_offset = atoi(getenv("TGL_DOT_OFFSET"));
+    if (getenv("TGL_PPU_OFFSET")) n->ppu_offset = atoi(getenv("TGL_PPU_OFFSET"));
     if (getenv("TGL_DMC_PHASE")) n->dmc.timer = atoi(getenv("TGL_DMC_PHASE"));
     if (getenv("TGL_HIT_DELAY")) n->hit_delay = atoi(getenv("TGL_HIT_DELAY"));
     if (getenv("TGL_NOSKIP")) n->ppu.skip_vblank = 0;

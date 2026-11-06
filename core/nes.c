@@ -192,9 +192,9 @@ void nes_write(Nes *n, uint16_t a, uint8_t v) {
  * (3 - access_split) точки, после — access_split точек. Затем процессор
  * опрашивает линии прерываний (cpu_end_cycle). */
 
-static uint64_t ppu_target(Nes *n, int part) {
-    int64_t t = (int64_t)n->cpu.cycles * 3 + n->dot_offset - (part == 0 ? n->access_split : 0);
-    return t < 0 ? 0 : (uint64_t)t;
+static void ppu_sync(Nes *n) {
+    int64_t t = ((int64_t)n->master - n->ppu_offset) / 4;
+    if (t > 0) ppu_advance_to(n, (uint64_t)t);
 }
 
 static void capture_frame_end(Nes *n) {
@@ -206,23 +206,26 @@ static void capture_frame_end(Nes *n) {
     }
 }
 
-static void cycle_start(Nes *n) {
+/* начало такта: до обращения к шине проходит 5 (чтение) или 7 (запись) мастер-тактов */
+static void cycle_start(Nes *n, int is_read) {
     n->cpu.cycles++;
-    ppu_advance_to(n, ppu_target(n, 0));
+    n->master += is_read ? 5 : 7;
+    ppu_sync(n);
     dmc_clock(n);
     n->cpu.irq_line = n->dmc.irq_flag;
     capture_frame_end(n);
 }
 
-static void cycle_end(Nes *n) {
-    ppu_advance_to(n, ppu_target(n, 1));
+static void cycle_end(Nes *n, int is_read) {
+    n->master += is_read ? 7 : 5;
+    ppu_sync(n);
     capture_frame_end(n);
 }
 
 /* такт, в котором процессор стоит (подкачка DMA): обращение делает DMA, опрос прерываний идёт */
 static void halted_cycle(Nes *n) {
-    cycle_start(n);
-    cycle_end(n);
+    cycle_start(n, 1);
+    cycle_end(n, 1);
     cpu_end_cycle(&n->cpu);
 }
 
@@ -234,9 +237,9 @@ static void dma_dmc(Nes *n) {
     halted_cycle(n);                 /* остановка */
     halted_cycle(n);                 /* пустой такт */
     if (!is_get_cycle(n)) halted_cycle(n);   /* выравнивание на такт «get» */
-    cycle_start(n);
+    cycle_start(n, 1);
     uint8_t b = nes_read(n, n->dmc.cur_addr);
-    cycle_end(n);
+    cycle_end(n, 1);
     cpu_end_cycle(&n->cpu);
     dmc_deliver(n, b);
     n->cpu.irq_line = n->dmc.irq_flag;
@@ -250,14 +253,14 @@ static void dma_oam(Nes *n) {
     uint16_t base = (uint16_t)(n->oam_dma_page << 8);
     for (int i = 0; i < 256; i++) {
         if (n->dmc.dma_pending) dma_dmc(n);    /* DMC важнее; упрощённо — целиком */
-        cycle_start(n);
+        cycle_start(n, 1);
         uint8_t v = nes_read(n, (uint16_t)(base + i));
-        cycle_end(n);
+        cycle_end(n, 1);
         cpu_end_cycle(&n->cpu);
-        cycle_start(n);
+        cycle_start(n, 0);
         n->ppu.oam[n->ppu.oam_addr] = v;
         n->ppu.oam_addr++;
-        cycle_end(n);
+        cycle_end(n, 0);
         cpu_end_cycle(&n->cpu);
     }
 }
@@ -267,17 +270,17 @@ static uint8_t bus_read(void *ctx, uint16_t a) {
     /* подкачки выполняются только на тактах чтения */
     if (n->oam_dma_pending) dma_oam(n);
     if (n->dmc.dma_pending) dma_dmc(n);
-    cycle_start(n);
+    cycle_start(n, 1);
     uint8_t v = nes_read(n, a);
-    cycle_end(n);
+    cycle_end(n, 1);
     return v;
 }
 
 static void bus_write(void *ctx, uint16_t a, uint8_t v) {
     Nes *n = (Nes *)ctx;
-    cycle_start(n);
+    cycle_start(n, 0);
     nes_write(n, a, v);
-    cycle_end(n);
+    cycle_end(n, 0);
 }
 
 void nes_idle_cycles(Nes *n, int cycles) {
@@ -299,8 +302,7 @@ int nes_load_rom(Nes *n, const uint8_t *d, int size) {
     n->hooks = (NesHooks *)calloc(1, sizeof(NesHooks));
     for (int i = 0; i < 0x10000; i++) n->hooks->bank[i] = -1;
     cpu_init(&n->cpu, bus_read, bus_write, n);
-    n->dot_offset = 6;      /* измерено по записи Mesen: конец кадра на том же такте процессора */
-    n->access_split = 2;
+    n->ppu_offset = -25;    /* измерено по записи Mesen: при -26..-24 такт конца кадра совпадает во всех кадрах */
     n->race_dot = 1;
     return 0;
 }
@@ -322,6 +324,7 @@ void nes_reset(Nes *n) {
     n->dmc.sample_addr = 0xC000;
     n->dmc.sample_len = 1;
     n->cpu.cycles = 0;
+    n->master = 0;
     update_nmi(n);
     cpu_reset(&n->cpu);
 }
