@@ -1,7 +1,9 @@
 /* nes.c — шина, картридж UNROM, PPU, канал DMC, геймпад. Тайминг потактовый. */
-#include <string.h>
-#include <stdlib.h>
+#include "rt.h"
 #include "nes.h"
+
+/* Таблица перехватов одна на программу: все копии состояния приставки ссылаются на неё. */
+static NesHooks g_hooks;
 
 /* Стандартная палитра 2C02 (приближение к реальному выводу NTSC). */
 const uint32_t NES_PALETTE[64] = {
@@ -290,7 +292,7 @@ void nes_idle_cycles(Nes *n, int cycles) {
 /* ---------------------------------------------------------------- загрузка и сброс */
 
 int nes_load_rom(Nes *n, const uint8_t *d, int size) {
-    if (size < 16 || memcmp(d, "NES\x1A", 4) != 0) return -1;
+    if (size < 16 || d[0] != 'N' || d[1] != 'E' || d[2] != 'S' || d[3] != 0x1A) return -1;
     int prg16 = d[4], chr8 = d[5];
     int mapper = (d[6] >> 4) | (d[7] & 0xF0);
     int trainer = (d[6] & 4) ? 512 : 0;
@@ -299,8 +301,8 @@ int nes_load_rom(Nes *n, const uint8_t *d, int size) {
     memset(n, 0, sizeof *n);
     n->prg = (uint8_t *)(d + 16 + trainer);
     n->prg_banks = prg16;
-    n->hooks = (NesHooks *)calloc(1, sizeof(NesHooks));
-    for (int i = 0; i < 0x10000; i++) n->hooks->bank[i] = -1;
+    n->hooks = &g_hooks;
+    for (int i = 0; i < 0x10000; i++) { g_hooks.fn[i] = 0; g_hooks.bank[i] = -1; g_hooks.cycles[i] = 0; }
     cpu_init(&n->cpu, bus_read, bus_write, n);
     n->ppu_offset = -25;    /* измерено по записи Mesen: при -26..-24 такт конца кадра совпадает во всех кадрах */
     n->race_dot = 1;

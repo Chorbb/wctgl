@@ -1,0 +1,29 @@
+; TGL Port — оболочка Godot для ядра порта (native/tglcore.dll).
+; Открыть в Godot 4.x .NET: Import -> выбрать этот файл.
+
+config_version=5
+
+[application]
+
+config/name="TGL Port"
+run/main_scene="res://Main.tscn"
+config/features=PackedStringArray("4.7", "C#", "GL Compatibility")
+
+[display]
+
+window/size/viewport_width=256
+window/size/viewport_height=240
+window/size/window_width_override=768
+window/size/window_height_override=720
+window/stretch/mode="viewport"
+window/stretch/scale_mode="integer"
+
+[dotnet]
+
+project/assembly_name="TglPort"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/canvas_textures/default_texture_filter=0
