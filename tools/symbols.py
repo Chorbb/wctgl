@@ -12,7 +12,7 @@ def load(path='symbols/tgl.sym'):
         if kind in ('ram', 'arr'):
             ram.append({'kind': kind, 'addr': int(p[1].lstrip('$'), 16), 'size': int(p[2]), 'name': p[3],
                         'status': p[4], 'desc': p[5] if len(p) > 5 else ''})
-        elif kind in ('code', 'spot'):
+        elif kind in ('code', 'spot', 'data'):
             code[(int(p[1]), int(p[2], 16))] = {'kind': kind, 'name': p[3], 'status': p[4],
                                                 'desc': p[5] if len(p) > 5 else ''}
     return ram, code
