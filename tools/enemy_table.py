@@ -31,11 +31,16 @@ if os.path.exists('build/statwatch.txt'):
 print('# Типы объектов The Guardian Legend (таблицы в ROM, банк 7)\n')
 print('Индекс — номер типа (obj_type & $7F). Адрес байта: таблица + номер типа.')
 print('Здоровье врагов коридоров задают ещё и таблицы банка 6 — здесь не все.\n')
-print('| тип | здоровье $D0AB | урон $D12A | параметр $D02C | флаги $D1A9 | встречен в зонах | здоровье задаёт также |')
-print('|---|---|---|---|---|---|---|')
+ai = {t: (rom.byte(6, 0x80DE + t) | rom.byte(6, 0x815D + t) << 8) + 1 for t in range(127)}
+share = collections.Counter(ai.values())
+print('Поведение — процедура из таблицы банка 6 ($80DE/$815D, вызов $8218). «свободен» — процедура')
+print('$C048 сразу освобождает ячейку: тип в игре не используется, его можно занять новым врагом.\n')
+print('| тип | поведение | здоровье $D0AB | урон $D12A | параметр $D02C | флаги $D1A9 | встречен в зонах | здоровье задаёт также |')
+print('|---|---|---|---|---|---|---|---|')
 for t in range(1, 128):
     zones = ', '.join(str(z) for z, _ in sorted(seen[t].items())) if seen[t] else ''
-    print('| %d ($%02X) | %d | %d | %d | $%02X | %s | %s |' % (t, t, tab['hp'][t], tab['dmg'][t], tab['param'][t], tab['flags'][t], zones,
+    beh = '—' if t >= 127 else ('свободен' if ai[t] == 0xC048 else '$%04X%s' % (ai[t], ' (общая с %d типами)' % (share[ai[t]] - 1) if share[ai[t]] > 1 else ''))
+    print('| %d ($%02X) | %s | %d | %d | %d | $%02X | %s | %s |' % (t, t, beh, tab['hp'][t], tab['dmg'][t], tab['param'][t], tab['flags'][t], zones,
                                                         ' '.join(sorted(other[t]))))
 
 names = {3: 'волна', 5: 'граната', 6: 'огненный шар', 8: 'отражатель'}
