@@ -134,6 +134,15 @@ static uint16_t prev_pc; static uint8_t prev_y, prev_x; static int prev_bank;
 static void trace_stat(Nes *n) {
     uint16_t pc = n->cpu.pc;
     uint8_t op = nes_read(n, pc), lo = nes_read(n, (uint16_t)(pc + 1)), hi = nes_read(n, (uint16_t)(pc + 2));
+    if (getenv("XT_CORR")) {
+        /* поток данных коридора: начало ($E58F, указатель $18) и каждая команда ($E6F0) */
+        if (pc == 0xE58F)
+            fprintf(stat_out, "B %04X %d %d %d\n", n->ram[0x18] | (n->ram[0x19] << 8), n->bank & 7, n->ram[0x51], n->ram[0x50]);
+        if (pc == 0xE6F0)
+            fprintf(stat_out, "C %d %04X %04X %d\n", n->cpu.a, (uint16_t)((n->ram[0xBC] | (n->ram[0xBD] << 8)) + n->cpu.y - 1),
+                    n->ram[0xB0] | (n->ram[0xB1] << 8), n->bank & 7);
+        return;
+    }
     if (getenv("XT_SCRIPT")) {
         /* начало сценария волн: после $E75B указатель $66/$67 и банк $7F заданы */
         if (pc == 0xE75D)
