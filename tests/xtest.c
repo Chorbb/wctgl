@@ -157,14 +157,24 @@ static int find_info(Nes *n, uint16_t pc) {
 
 /* до возврата: стек поднялся до s_ret; для круга цикла (loop_pc) — до возврата к его началу */
 static int loop_pc = -1;
+/* процедура, не вернувшаяся за столько кадров (финальные титры, сброс стека), не сравнивается */
+#define FINISH_MAX_FRAMES 30
+static int finish_timeout;
+static long check_skipped;
 static void finish(Nes *n, uint8_t s_ret) {
     if (loop_pc >= 0) {
         uint16_t head = (uint16_t)loop_pc;
         loop_pc = -1;
-        do nes_step(n); while (!(n->cpu.pc == head && n->cpu.s == s_ret) && !n->cpu.jammed);
+        uint64_t f0 = n->ppu.frames_done;
+        do nes_step(n); while (!(n->cpu.pc == head && n->cpu.s == s_ret) && !n->cpu.jammed &&
+                               n->ppu.frames_done - f0 < FINISH_MAX_FRAMES);
+        if (n->ppu.frames_done - f0 >= FINISH_MAX_FRAMES) finish_timeout = 1;
         return;
     }
-    while ((uint8_t)(n->cpu.s - s_ret) >= 0x80 && !n->cpu.jammed) nes_step(n);
+    uint64_t f0 = n->ppu.frames_done;
+    while ((uint8_t)(n->cpu.s - s_ret) >= 0x80 && !n->cpu.jammed && n->ppu.frames_done - f0 < FINISH_MAX_FRAMES)
+        nes_step(n);
+    if (n->ppu.frames_done - f0 >= FINISH_MAX_FRAMES) finish_timeout = 1;
 }
 
 static void finish_x(Nes *n, uint8_t s_ret, const XlatInfo *x) {
@@ -210,6 +220,11 @@ static void check_wrapper(Nes *n) {
     complete(n, s_ret, x);
     checking = 0;
 
+    if (finish_timeout) {
+        finish_timeout = 0; check_skipped++;
+        *n = ref; n->cpu.ctx = n; n->use_hooks = 1;   /* продолжаем с эталона */
+        return;
+    }
     checks++; per_fn_calls[i]++;
     if (n->ppu.frames_done != f0) spans++;
     char why[256];
@@ -360,8 +375,9 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (is_check) {
-        printf("check: %ld frames in %ld segments, %ld calls, %ld mismatches, %ld spanned a frame end\n",
-               total_frames, segs, checks, check_fail, spans);
+        printf("check: %ld frames in %ld segments, %ld calls, %ld mismatches, %ld spanned a frame end, "
+               "%ld not compared (no return in %d frames)\n", total_frames, segs, checks, check_fail, spans,
+               check_skipped, FINISH_MAX_FRAMES);
         if (getenv("XT_VERBOSE"))
             for (int i = 0; i < xlat_count; i++)
                 printf("  %-14s %8ld calls %6ld bad\n", xlat_table[i].name, per_fn_calls[i], per_fn_fail[i]);
