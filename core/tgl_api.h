@@ -11,7 +11,7 @@
 #  define TGL_API __attribute__((visibility("default")))
 #endif
 
-/* Версия интерфейса: меняется, если меняются функции ниже. 2 — добавлен звук. */
+/* Версия интерфейса: меняется, если меняются функции ниже. 2 — звук, 3 — правка ROM (моды). */
 TGL_API int tgl_api_version(void);
 /* Загрузить ROM (копируется внутрь) и перезагрузить игру. 0 = успех, <0 = ошибка формата. */
 TGL_API int tgl_load_rom(const uint8_t *rom, int size);
@@ -38,5 +38,10 @@ TGL_API int tgl_translated_routines(void);
 TGL_API void tgl_audio_set_rate(double hz);
 /* Забрать накопленный звук: до max отсчётов, 16 бит, моно. Возвращает сколько забрано. */
 TGL_API int tgl_audio_read(int16_t *out, int max);
+
+/* ---- моды (версия 3) ----
+ * Правка копии ROM в памяти: банк 0..7, адрес процессора, байты. 0 = успех.
+ * После правок вызовите tgl_reset(), чтобы игра началась с ними. */
+TGL_API int tgl_patch_rom(int bank, int addr, const uint8_t *data, int len);
 
 #endif

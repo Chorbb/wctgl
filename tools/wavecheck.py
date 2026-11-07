@@ -9,11 +9,10 @@ E (появился враг), G (появился генератор), F (не 
 """
 import sys, os
 here = os.path.dirname(os.path.abspath(__file__))
-src = open(os.path.join(here, 'waves.py'), encoding='utf-8').read().split('\nif __name__')[0]
-g = {'__file__': os.path.join(here, 'waves.py')}
-argv, sys.argv = sys.argv, [sys.argv[0], sys.argv[1]]
-exec(src, g)
-sys.argv = argv
+sys.path.insert(0, here)
+import waves
+waves.init(sys.argv[1])
+g = {'decode': waves.decode}
 runs, cur = [], None
 for l in open(sys.argv[2]):
     p = l.split()
@@ -22,7 +21,7 @@ for l in open(sys.argv[2]):
     elif cur is not None and p[0] in ('E', 'G', 'F'): cur['ev'].append((p[0], int(p[1])))
 ok = bad = events = 0
 for r in runs:
-    exp = [('E', v) if k == 'враг' else ('G', v[0]) for k, v in g['decode'](r['bank'], r['ptr']) if k in ('враг', 'генератор')]
+    exp = [('E', v) if k == 'враг' else ('G', v[0]) for k, v, *_ in g['decode'](r['bank'], r['ptr']) if k in ('враг', 'генератор')]
     got = [e for e in r['ev'] if e[0] != 'F']
     n = min(len(got), len(exp))
     if n == 0: continue

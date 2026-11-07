@@ -21,7 +21,7 @@ static void on_frame_end(Nes *n) {
     else deferred = 1;
 }
 
-int tgl_api_version(void) { return 2; }
+int tgl_api_version(void) { return 3; }
 
 int tgl_load_rom(const uint8_t *rom, int size) {
     if (!rom || size <= 0 || size > ROM_MAX) return -10;
@@ -82,4 +82,18 @@ void tgl_audio_set_rate(double hz) {
 int tgl_audio_read(int16_t *out, int max) {
     if (!loaded || max <= 0) return 0;
     return apu_read(&nes.apu, out, max);
+}
+
+/* Правка данных ROM (моды): bank 0..7, addr — адрес процессора ($8000-$BFFF для банков 0-6,
+ * $C000-$FFFF для банка 7). Пишет в копию ROM в памяти; файл на диске не меняется.
+ * 0 = успех, <0 = адрес вне ROM. Переведённый код читает данные из этой копии, поэтому правки
+ * данных действуют сразу; правки самого кода через перевод не действуют (см. tools/mod.py). */
+int tgl_patch_rom(int bank, int addr, const uint8_t *data, int len) {
+    if (!loaded || !data || len <= 0) return -1;
+    int banks = nes.prg_banks;
+    if (bank < 0 || bank >= banks) return -2;
+    int base = (bank == banks - 1) ? 0xC000 : 0x8000;
+    if (addr < base || addr + len > base + 0x4000) return -3;
+    for (int i = 0; i < len; i++) nes.prg[bank * 0x4000 + (addr - base) + i] = data[i];
+    return 0;
 }

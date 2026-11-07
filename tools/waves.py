@@ -17,8 +17,14 @@ import sys, os, collections
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from disasm import Rom
 
-rom = Rom(sys.argv[1])
-hp = [rom.byte(7, 0xD0AB + t) for t in range(128)]
+rom = None
+hp = []
+
+
+def init(path):
+    global rom, hp
+    rom = Rom(path)
+    hp = [rom.byte(7, 0xD0AB + t) for t in range(128)]
 
 
 def rd(bank, a):
@@ -41,16 +47,16 @@ def decode(bank, ptr, limit=200):
             ptr, y = tgt, 0; continue
         if b == 2:
             out.append(('конец', None)); break
-        t = b
+        t, taddr = b, ptr + y - 1
         while True:
             if t & 0x80:
                 a1, a2 = rd(bank, ptr + y), rd(bank, ptr + y + 1); y += 2
-                out.append(('генератор', (t & 0x7F, a1, a2)))
+                out.append(('генератор', (t & 0x7F, a1, a2), taddr))
             else:
-                out.append(('враг', t))
+                out.append(('враг', t, taddr))
             d = rd(bank, ptr + y); y += 1
             if d & 0x80:
-                t = d; continue
+                t, taddr = d, ptr + y - 1; continue
             if d == 0:
                 y += 1          # так в коде: INY перед следующим чтением
                 break
@@ -59,23 +65,26 @@ def decode(bank, ptr, limit=200):
     return out
 
 
-if __name__ != '__main__':
-    raise SystemExit  # модуль используется только для decode()
+def main():
+  init(sys.argv[1])
+  starts = collections.OrderedDict()
+  for line in open(sys.argv[2]):
+      p = line.split()
+      if p[0] == 'P':
+          starts.setdefault((int(p[2]), int(p[1], 16)), (int(p[3]), int(p[4]), int(p[5])))
+  print('# Сценарии волн врагов\n')
+  print('Из записи прохождения: каждый сценарий — откуда он начался (банк, адрес) и где был игрок')
+  print('(зона, X, Y). Тип врага — номер из таблицы enemy_types.md, рядом — его здоровье из $D0AB.\n')
+  for (bank, ptr), (area, x, y) in sorted(starts.items()):
+      print('## Банк %d, $%04X — зона %d, X %d, Y %d\n' % (bank, ptr, area, x, y))
+      for kind, v, *_ in decode(bank, ptr):
+          if kind == 'враг': print('- враг тип %d (здоровье %d)' % (v, hp[v]))
+          elif kind == 'генератор': print('- генератор врагов тип %d (параметры %d, %d)' % (v[0], v[1], v[2]))
+          elif kind == 'пауза': print('- пауза %d' % v)
+          elif kind in ('переход', 'цикл'): print('- %s на $%04X' % (kind, v))
+          else: print('- конец')
+      print()
 
-starts = collections.OrderedDict()
-for line in open(sys.argv[2]):
-    p = line.split()
-    if p[0] == 'P':
-        starts.setdefault((int(p[2]), int(p[1], 16)), (int(p[3]), int(p[4]), int(p[5])))
-print('# Сценарии волн врагов\n')
-print('Из записи прохождения: каждый сценарий — откуда он начался (банк, адрес) и где был игрок')
-print('(зона, X, Y). Тип врага — номер из таблицы enemy_types.md, рядом — его здоровье из $D0AB.\n')
-for (bank, ptr), (area, x, y) in sorted(starts.items()):
-    print('## Банк %d, $%04X — зона %d, X %d, Y %d\n' % (bank, ptr, area, x, y))
-    for kind, v in decode(bank, ptr):
-        if kind == 'враг': print('- враг тип %d (здоровье %d)' % (v, hp[v]))
-        elif kind == 'генератор': print('- генератор врагов тип %d (параметры %d, %d)' % (v[0], v[1], v[2]))
-        elif kind == 'пауза': print('- пауза %d' % v)
-        elif kind in ('переход', 'цикл'): print('- %s на $%04X' % (kind, v))
-        else: print('- конец')
-    print()
+
+if __name__ == "__main__":
+    main()

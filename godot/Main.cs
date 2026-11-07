@@ -5,7 +5,9 @@
 // вывод картинки 256x240 и чтение клавиатуры/геймпада.
 //
 // Управление:  стрелки/WASD — крестовина, Z — B (огонь), X — A (доп. оружие),
-//              Enter — Start, Shift — Select, F5 — Reset, M — звук вкл/выкл, Esc — выход.
+//              Enter — Start, Shift — Select, F5 — Reset, M — звук вкл/выкл,
+//              F7 — перечитать моды и начать заново, Esc — выход.
+// Моды: файлы *.tglpatch в папке mods рядом с проектом (собираются tools/mod.py из .tglmod).
 // Геймпад:     крестовина/левый стик, нижняя кнопка — B, правая — A, Start, Back/Select.
 
 using Godot;
@@ -25,6 +27,8 @@ public partial class Main : Node2D
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_frame_count();
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_audio_set_rate(double hz);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_audio_read(short[] buf, int max);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_patch_rom(int bank, int addr, byte[] data, int len);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_use_translation(int on);
 
     // Где искать ROM по умолчанию. Если файла нет, откроется окно выбора, путь запомнится.
     const string DefaultRomPath = "C:/TGL_claude/rom/Guardian Legend, The (USA).nes";
@@ -68,7 +72,7 @@ public partial class Main : Node2D
         {
             SetupNativeLibrary();
             int ver = tgl_api_version();
-            if (ver != 2) { ShowMessage($"Неожиданная версия tglcore.dll: {ver} (нужна 2). Обновите native/tglcore.dll."); return; }
+            if (ver != 3) { ShowMessage($"Неожиданная версия tglcore.dll: {ver} (нужна 3). Обновите native/tglcore.dll."); return; }
         }
         catch (Exception e)
         {
@@ -108,9 +112,50 @@ public partial class Main : Node2D
             return false;
         }
         SaveSetting("rom_path", path);
-        ShowMessage("");
+        ShowMessage(ApplyMods());
+        _msgTimer = 5.0;
+        tgl_reset();
         _running = true;
         return true;
+    }
+
+    double _msgTimer;
+
+    // Моды: каждая строка .tglpatch — «банк адрес байты…» (hex), «translation off» или комментарий «#».
+    // Правки ложатся на копию ROM в ядре; файл ROM на диске не меняется.
+    string ApplyMods()
+    {
+        string dir = ProjectSettings.GlobalizePath("res://mods");
+        if (!System.IO.Directory.Exists(dir)) return "";
+        var files = System.IO.Directory.GetFiles(dir, "*.tglpatch");
+        Array.Sort(files);
+        if (files.Length == 0) return "";
+        var report = new System.Text.StringBuilder("Моды:\n");
+        bool translation = true;
+        foreach (var f in files)
+        {
+            int ok = 0, bad = 0;
+            foreach (var raw in System.IO.File.ReadAllLines(f))
+            {
+                string line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("#")) continue;
+                if (line == "translation off") { translation = false; continue; }
+                var w = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                try
+                {
+                    int bank = int.Parse(w[0]);
+                    int addr = Convert.ToInt32(w[1], 16);
+                    var data = new byte[w.Length - 2];
+                    for (int i = 0; i < data.Length; i++) data[i] = Convert.ToByte(w[i + 2], 16);
+                    if (tgl_patch_rom(bank, addr, data, data.Length) == 0) ok++; else bad++;
+                }
+                catch (Exception) { bad++; }
+            }
+            report.Append($"  {System.IO.Path.GetFileNameWithoutExtension(f)}: правок {ok}" + (bad > 0 ? $", ошибок {bad}" : "") + "\n");
+        }
+        tgl_use_translation(translation ? 1 : 0);
+        if (!translation) report.Append("  (мод меняет код — игра идёт на эмуляторе)\n");
+        return report.ToString();
     }
 
     void AskForRom()
@@ -132,6 +177,7 @@ public partial class Main : Node2D
     public override void _Process(double delta)
     {
         if (Input.IsKeyPressed(Key.Escape)) GetTree().Quit();
+        if (_msgTimer > 0) { _msgTimer -= delta; if (_msgTimer <= 0) ShowMessage(""); }
         if (!_running) return;
 
         _acc += delta;
@@ -160,6 +206,11 @@ public partial class Main : Node2D
         {
             if (k.Keycode == Key.F5 && _running) tgl_reset();
             if (k.Keycode == Key.M) _muted = !_muted;
+            if (k.Keycode == Key.F7 && _running)
+            {
+                _running = false;                       // ROM заново (без старых правок) + моды
+                TryLoadRom(LoadSetting("rom_path", DefaultRomPath));
+            }
         }
     }
 
