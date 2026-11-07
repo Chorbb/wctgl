@@ -128,6 +128,27 @@ static void trace_prof(Nes *n) {
     if (b >= 0) ((uint32_t *)cov)[b * 0x10000 + pc]++;
 }
 
+/* statwatch: предыдущая инструкция (для источника значения) */
+static FILE *stat_out;
+static uint16_t prev_pc; static uint8_t prev_y, prev_x; static int prev_bank;
+static void trace_stat(Nes *n) {
+    uint16_t pc = n->cpu.pc;
+    uint8_t op = nes_read(n, pc), lo = nes_read(n, (uint16_t)(pc + 1)), hi = nes_read(n, (uint16_t)(pc + 2));
+    if (op == 0x9D && hi == 0x05 && (lo == 0x90 || lo == 0xA8)) {
+        uint8_t pop = nes_read(n, prev_pc);
+        uint16_t src = (uint16_t)(nes_read(n, (uint16_t)(prev_pc + 1)) | (nes_read(n, (uint16_t)(prev_pc + 2)) << 8));
+        int idx = -1;
+        if (pop == 0xB9) idx = prev_y; else if (pop == 0xBD) idx = prev_x; else if (pop == 0xAD) idx = 0;
+        else src = 0;
+        if (pop == 0xA9) { src = 0xFFFF; idx = nes_read(n, (uint16_t)(prev_pc + 1)); }   /* константа */
+        int bank = pc >= 0xC000 ? 7 : (n->bank & 7);
+        fprintf(stat_out, "W %s %04X %d %02X %02X %04X %d %d\n", lo == 0x90 ? "hp" : "dmg", pc, bank,
+                n->ram[0x500 + n->cpu.x], n->cpu.a, src, idx, prev_bank);
+    }
+    prev_pc = pc; prev_y = n->cpu.y; prev_x = n->cpu.x;
+    prev_bank = pc >= 0xC000 ? 7 : (n->bank & 7);
+}
+
 /* ---------------------------------------------------------------- проверка процедур */
 
 /* трасса: состояние перед каждой инструкцией */
@@ -316,6 +337,26 @@ int main(int argc, char **argv) {
         }
         fclose(o);
         printf("dump: %ld records\n", recs);
+        return 0;
+    }
+
+    if (!strcmp(mode, "statwatch")) {
+        /* откуда объекты получают здоровье и урон: при каждой записи STA $0590,X / STA $05A8,X
+         * запоминается тип объекта, значение и источник (предыдущая инструкция LDA таблица,Y).
+         * Вывод: "W массив pc банк тип значение источник индекс" (уникальные строки). */
+        if (!use_snaps) { fprintf(stderr, "statwatch: нужен snap.bin\n"); return 2; }
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/statwatch.txt", "w");
+        Nes *m = NULL;
+        for (int si = s_from; si < s_to; si += s_step) {
+            cur_snap = &sl.snaps[si];
+            m = make_nes_into(m, rom, rom_size);
+            m->use_hooks = 0; m->trace_fn = trace_stat; stat_out = o;
+            int segf = frames;
+            if (cur_snap->frame + 1 + (uint32_t)segf > sl.frames) segf = (int)(sl.frames - cur_snap->frame - 1);
+            for (int f = 0; f < segf; f++) nes_run_frame(m);
+        }
+        fclose(o);
+        printf("statwatch: done\n");
         return 0;
     }
 
