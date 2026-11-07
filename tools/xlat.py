@@ -51,6 +51,9 @@ class Gen:
         self.cov = coverage            # set of (bank, addr)
         self.nonproc = set()           # адреса переходников (не обычных процедур)
         self.loop_entry = None
+        self.cur_entry = None
+        self.loop_heads = set()
+        self._disp = {}
         self.far = set()               # переходники дальнего вызова: JSR far / .byte банк, адрес-1 (2 байта)
 
     def bank_of(self, addr, bank):
@@ -76,6 +79,8 @@ class Gen:
             pc = todo.pop()
             if pc in seen or not (pc >= 0x8000) or not self.covered(bank, pc):
                 continue
+            if pc in self.loop_heads and pc != entry:
+                continue                     # начало главного цикла — граница любой процедуры
             d = self.decode(bank, pc)
             seen[pc] = d
             if d is None:
@@ -92,6 +97,8 @@ class Gen:
                 todo.append(nxt)
             elif mn == 'JMP' and mode == 'abs':
                 todo.append(v)
+            elif mn == 'RTS' and self.dispatch_ret(bank, pc) is not None:
+                todo.append(self.dispatch_ret(bank, pc))
             elif mn in ('RTS', 'RTI', 'BRK') or (mn == 'JMP' and mode == 'ind'):
                 pass
             else:
@@ -99,6 +106,33 @@ class Gen:
             if len(seen) > 3000:
                 break
         return seen, calls
+
+    def dispatch_ret(self, bank, pc):
+        """RTS как вызов по таблице: перед ним в стек кладут адрес возврата (LDA #hi PHA LDA #lo PHA),
+        затем адрес обработчика из таблицы (LDA tab,Y PHA LDA tab,Y PHA). Возвращает адрес,
+        куда вернётся обработчик, или None."""
+        key = (bank, pc)
+        if key in self._disp:
+            return self._disp[key]
+        res = None
+        for k in range(8, 24):
+            a, seq = pc - k, []
+            while a < pc and len(seq) < 16:
+                d = self.decode(bank, a)
+                if d is None:
+                    break
+                seq.append(d)
+                a += d[2]
+            if a != pc or len(seq) < 8:
+                continue
+            t = seq[-8:]
+            mn = [x[0] for x in t]
+            if mn == ['LDA', 'PHA', 'LDA', 'PHA', 'LDA', 'PHA', 'LDA', 'PHA'] and t[0][1] == 'imm' and t[2][1] == 'imm' \
+                    and t[4][1] != 'imm' and t[6][1] != 'imm':
+                res = ((t[0][3] << 8) | t[2][3]) + 1 & 0xFFFF
+                break
+        self._disp[key] = res
+        return res
 
     def far_target(self, bank, pc):
         """Параметры дальнего вызова после JSR: банк, затем адрес входа минус 1 (переходник
@@ -134,6 +168,11 @@ class Gen:
                     return False
             elif mn == 'TXS' or mn.endswith('*') and mn[:-1] in ('TAS', 'TXS'):
                 return False
+            if mn == 'RTS' and self.dispatch_ret(bank, pc) is not None:
+                if dep < 4:
+                    return False
+                todo.append((self.dispatch_ret(bank, pc), dep - 4))
+                continue
             if mn in ('RTS', 'RTI'):
                 if mn != end or dep != 0:
                     return False
@@ -186,7 +225,8 @@ class Gen:
         out = []
 
         def goto(addr):
-            if self.loop_entry is not None and addr == self.loop_entry:
+            if (self.loop_entry is not None and addr == self.loop_entry) or \
+                    (addr in self.loop_heads and addr != self.cur_entry):
                 return 'return;'        # круг цикла закончен: следующий круг начнётся с nes_step
             if addr in body and body[addr] is not None:
                 if addr <= pc:              # переход назад: цикл — не держать управление слишком долго
@@ -211,7 +251,8 @@ class Gen:
             return out
         if mn == 'JMP' and mode == 'abs':
             out.append('XCYC(3, 0, %s);' % h4(v))
-            if self.loop_entry is not None and v == self.loop_entry:
+            if (self.loop_entry is not None and v == self.loop_entry) or \
+                    (v in self.loop_heads and v != self.cur_entry):
                 out.append('return;')
             elif v in body and body[v] is not None:
                 out.append(('if (xlat_stop(n)) return; ' if v <= pc else '') + 'goto L_%04X;' % v)
@@ -233,6 +274,12 @@ class Gen:
             ret = (pc + 2) & 0xFFFF
             out.append('XPUSH(%s); XPUSH(%s); XCYC(6, 0b11000, %s);' % (h4(ret >> 8), h4(ret & 0xFF), h4(v)))
             out.append('if (!xlat_call(n, %s, %s)) return; %s' % (h4(v), h4(nxt), goto(nxt)))
+            return out
+        if mn == 'RTS' and self.dispatch_ret(bank, pc) is not None:
+            ret = self.dispatch_ret(bank, pc)
+            # обработчик вернётся в ret: адрес возврата уже в стеке, как после JSR
+            out.append('{ uint8_t lo_ = XPULL(); uint8_t hi_ = XPULL(); uint16_t r_ = (uint16_t)((lo_ | (hi_ << 8)) + 1);'
+                       ' XCYC(6, 0, r_); if (!xlat_call(n, r_, %s)) return; } %s' % (h4(ret), goto(ret)))
             return out
         if mn == 'RTS':
             out.append('{ uint8_t lo_ = XPULL(); uint8_t hi_ = XPULL(); uint16_t r_ = (uint16_t)((lo_ | (hi_ << 8)) + 1);'
@@ -329,6 +376,7 @@ class Gen:
 
     def function(self, bank, entry, name, kind='jsr'):
         self.loop_entry = entry if kind == 'loop' else None
+        self.cur_entry = entry
         body, calls = self.body(bank, entry)
         lines = ['/* %s: банк %s, вход $%04X */' % (name, bank if 0x8000 <= entry < 0xC000 else 'fix', entry),
                  'static void %s(Nes *n) {' % name]
@@ -365,6 +413,15 @@ def load_coverage(path):
     return cov
 
 
+def load_rts_targets(path):
+    t = set()
+    for line in open(path):
+        p = line.split()
+        if len(p) == 3 and p[0] == 'T':
+            t.add((int(p[1]), int(p[2], 16)))
+    return t
+
+
 def main():
     rom = Rom(sys.argv[1])
     cov = load_coverage(sys.argv[2])
@@ -385,6 +442,18 @@ def main():
 
     g = Gen(rom, cov)
     g.far = set(far_entries)
+    g.loop_heads = {e for b, e, k, nm in want if k == 'loop'}
+    # входы, куда попадали через RTS не как возврат из JSR: обработчики из таблиц переходов
+    # и продолжения после переходников. Переводим их как отдельные процедуры.
+    if '--rts-entries' in sys.argv:
+        for b, t in sorted(load_rts_targets(sys.argv[2])):
+            bb = b if 0x8000 <= t < 0xC000 else 7
+            def byte(a):
+                return rom.byte(bb, a & 0xFFFF) if (a >= 0xC000 or 0x8000 <= a < 0xC000) else None
+            jsr3 = byte(t - 3) == 0x20
+            far6 = byte(t - 6) == 0x20 and ((byte(t - 5) or 0) | (byte(t - 4) or 0) << 8) in g.far
+            if not jsr3 and not far6:
+                want.append((bb, t, 'jsr', None))
     done, order, out_fns, total, skipped = {}, list(want), [], 0, []
     while order:
         bank, entry, kind, name = order.pop(0)
@@ -417,12 +486,16 @@ def main():
                 else:
                     order.append((7, t, 'jsr', None))
 
+    uniq = set()
     # адреса банковых процедур, которые где-то оказались переходниками, тоже отдаём эмулятору
     for key in list(done):
         if key[1] in g.nonproc:
             skipped.append(done.pop(key)[0])
     for key, (name, kind, _) in list(done.items()):
         code, _, nbytes = g.function(key[0], key[1], name, kind)
+        for pc_, d_ in g.body(key[0], key[1])[0].items():
+            if d_ is not None:
+                uniq.add((g.bank_of(pc_, key[0]), pc_, d_[2]))
         done[key] = (name, kind, nbytes)
         out_fns.append(code)
         total += nbytes
@@ -442,6 +515,7 @@ def main():
         for (bank, entry), (name, kind, nb) in done.items():
             f.write('    nes_set_hook(n, %d, 0x%04X, %s);\n' % (bank, entry, name))
         f.write('}\n')
+    print('unique translated code: %d bytes' % sum(u[2] for u in uniq))
     print('translated %d routines, %d bytes of code; left to emulator (stack tricks): %s'
           % (len(done), total, ', '.join(sorted(set(skipped))) or '-'))
 

@@ -8,10 +8,17 @@
 static uint8_t rom_copy[ROM_MAX];
 static Nes nes;
 static int loaded;
-static uint8_t pending_buttons;
-
-/* кнопки вступают в силу ровно в такт конца кадра — одинаково с переводом и без него */
-static void on_frame_end(Nes *n) { n->pad_state = pending_buttons; }
+/* Кнопки привязаны к номеру кадра: переданные в вызове k вступают в силу в такт конца
+ * кадра k (одинаково с переводом и без него). Если переведённый код дошёл до конца кадра
+ * раньше, чем пришли его кнопки, они применяются в начале следующего вызова — до этого
+ * игра кнопки не читает (код сворачивается сразу за концом кадра, см. frame_done). */
+static uint8_t buttons_of_call;
+static int deferred;
+static void on_frame_end(Nes *n) {
+    uint64_t want = n->ppu.frames_done - 1;   /* номер вызова, чьи кнопки нужны */
+    if (want <= n->frame) { n->pad_state = buttons_of_call; deferred = 0; }
+    else deferred = 1;
+}
 
 int tgl_api_version(void) { return 1; }
 
@@ -35,7 +42,8 @@ void tgl_reset(void) {
 
 void tgl_run_frame(int buttons) {
     if (!loaded) return;
-    pending_buttons = (uint8_t)buttons;
+    buttons_of_call = (uint8_t)buttons;
+    if (deferred) { nes.pad_state = buttons_of_call; deferred = 0; }
     nes_run_frame(&nes);
 }
 

@@ -63,7 +63,7 @@ static inline void xlat_wr(Nes *n, uint16_t a, uint8_t v) {
  * Вызывается в ожиданиях и на переходах назад. 1 = надо выходить. */
 #define XLAT_MAX_FRAMES 3
 static inline int xlat_stop(Nes *n) {
-    if (!n->xlat_unwind && n->ppu.frames_done - n->hook_frames0 > XLAT_MAX_FRAMES) n->xlat_unwind = 1;
+    if (!n->xlat_unwind && n->ppu.frames_done - n->hook_frames0 > XLAT_MAX_FRAMES) { n->xlat_unwind = 1; n->unwinds++; }
     if (n->xlat_unwind) { n->xlat_bail = 1; return 1; }
     return 0;
 }

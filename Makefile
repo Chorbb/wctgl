@@ -40,7 +40,7 @@ coverage: $(BUILD)/xtest_base
 
 gen:
 	mkdir -p $(BUILD)/gen
-	python3 tools/xlat.py $(ROM) $(BUILD)/coverage.txt $(XLAT_ROUTINES) $(BUILD)/gen/xlat_gen.c --closure
+	python3 tools/xlat.py $(ROM) $(BUILD)/coverage.txt $(XLAT_ROUTINES) $(BUILD)/gen/xlat_gen.c --closure --rts-entries
 
 $(BUILD)/xtest: tests/xtest.c tests/reclog.h core/xlat.c $(BUILD)/gen/xlat_gen.c $(CORE) core/*.h
 	$(CC) $(CFLAGS) -Wno-unused-label -Wno-misleading-indentation -Icore -o $@ tests/xtest.c core/xlat.c $(BUILD)/gen/xlat_gen.c $(CORE)

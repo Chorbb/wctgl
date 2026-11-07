@@ -54,7 +54,20 @@ static int diff_state(const Nes *a, const Nes *b, char *why, int why_len) {
         x->prev_nmi_level != y->prev_nmi_level) { snprintf(why, why_len, "линии прерываний"); return 1; }
     for (int i = 0; i < 2048; i++)
         if (a->ram[i] != b->ram[i]) { snprintf(why, why_len, "память $%03X: %02X/%02X", i, a->ram[i], b->ram[i]); return 1; }
-    if (memcmp(&a->ppu, &b->ppu, sizeof a->ppu)) { snprintf(why, why_len, "видеочип"); return 1; }
+    static Ppu pa, pb;      /* frame_ended — учёт nes_run_frame, не состояние приставки */
+    pa = a->ppu; pb = b->ppu; pa.frame_ended = pb.frame_ended = 0;
+    if (memcmp(&pa, &pb, sizeof pa)) {
+        const Ppu *p = &pa, *q = &pb;
+        if (memcmp(p->framebuffer, q->framebuffer, sizeof p->framebuffer)) {
+            int i = 0; while (p->framebuffer[i] == q->framebuffer[i]) i++;
+            snprintf(why, why_len, "видеочип: картинка, строка %d", i / 256);
+        } else if (memcmp(p->nt, q->nt, sizeof p->nt)) snprintf(why, why_len, "видеочип: фон");
+        else if (memcmp(p->oam, q->oam, sizeof p->oam)) snprintf(why, why_len, "видеочип: спрайты");
+        else snprintf(why, why_len, "видеочип: регистры v=%04X/%04X t=%04X/%04X ctrl=%02X/%02X mask=%02X/%02X st=%02X/%02X sl=%d/%d dot=%d/%d",
+                      p->v, q->v, p->t, q->t, p->ctrl, q->ctrl, p->mask, q->mask, p->status, q->status,
+                      p->scanline, q->scanline, p->dot, q->dot);
+        return 1;
+    }
     if (memcmp(&a->dmc, &b->dmc, sizeof a->dmc)) { snprintf(why, why_len, "канал DMC"); return 1; }
     if (a->bank != b->bank) { snprintf(why, why_len, "банк %d/%d", a->bank, b->bank); return 1; }
     if (memcmp(a->chr, b->chr, sizeof a->chr)) { snprintf(why, why_len, "CHR-RAM"); return 1; }
@@ -69,7 +82,17 @@ static int diff_state(const Nes *a, const Nes *b, char *why, int why_len) {
 
 static uint8_t *cov;   /* [банк 0..7][адрес] */
 
+/* куда приводили RTS: [банк][адрес] — входы, в которые попадают не через JSR
+ * (переходы по таблице через RTS, продолжение после параметров вызова) */
+static uint8_t *rts_tgt;
+static int last_was_rts;
 static void trace_cov(Nes *n) {
+    {
+        uint16_t p0 = n->cpu.pc;
+        int b0 = p0 >= 0xC000 ? 7 : (p0 >= 0x8000 ? (n->bank & 7) : -1);
+        if (last_was_rts && b0 >= 0) rts_tgt[b0 * 0x10000 + p0] = 1;
+        last_was_rts = nes_read(n, p0) == 0x60;
+    }
     uint16_t pc = n->cpu.pc;
     int b = pc >= 0xC000 ? 7 : (pc >= 0x8000 ? (n->bank & 7) : -1);
     if (b >= 0) cov[b * 0x10000 + pc] = 1;
@@ -222,6 +245,7 @@ int main(int argc, char **argv) {
 
     if (!strcmp(mode, "coverage")) {
         cov = calloc(8, 0x10000);
+        rts_tgt = calloc(8, 0x10000);
         Nes *n = make_nes(rom, rom_size);
         n->trace_fn = trace_cov;
         for (int f = 0; f < frames; f++) nes_run_frame(n);
@@ -230,6 +254,9 @@ int main(int argc, char **argv) {
         for (int b = 0; b < 8; b++)
             for (int a = 0x8000; a < 0x10000; a++)
                 if (cov[b * 0x10000 + a]) { fprintf(o, "C %d %04X\n", b, a); cnt++; }
+        for (int b = 0; b < 8; b++)
+            for (int a = 0x8000; a < 0x10000; a++)
+                if (rts_tgt[b * 0x10000 + a]) fprintf(o, "T %d %04X\n", b, a);
         fclose(o);
         printf("coverage: %ld instructions over %d frames\n", cnt, frames);
         return 0;
@@ -286,11 +313,20 @@ int main(int argc, char **argv) {
             }
         }
         (void)ref_instr; (void)emu_bytes_exec;
+        if (getenv("XT_UNWIND")) {
+            /* повторить и показать, какие перехваты сворачивались */
+            static uint32_t hist[0x10000];
+            Nes *q = make_nes(rom, rom_size);
+            xlat_register_all(q); q->use_hooks = 1;
+            uint64_t u = 0;
+            for (int f = 0; f < frames; f++) { nes_run_frame(q); if (q->unwinds != u) { hist[q->hook_pc0]++; u = q->unwinds; } }
+            for (int a = 0; a < 0x10000; a++) if (hist[a]) printf("  unwind at hook $%04X: %u\n", a, hist[a]);
+        }
         long tb = 0;
         for (int i = 0; i < xlat_count; i++) tb += xlat_table[i].bytes;
         printf("game: %d frames, %d bad; translated routines %d (%ld bytes); "
-               "instructions run by translated code: %.1f%%\n", frames, bad, xlat_count, tb,
-               100.0 * (1.0 - (double)port->emu_steps / (double)ref->emu_steps));
+               "instructions run by translated code: %.1f%%; unwinds %llu\n", frames, bad, xlat_count, tb,
+               100.0 * (1.0 - (double)port->emu_steps / (double)ref->emu_steps), (unsigned long long)port->unwinds);
         return bad ? 1 : 0;
     }
     fprintf(stderr, "unknown mode\n");

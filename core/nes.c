@@ -453,6 +453,10 @@ static void frame_done(Nes *n) {
     n->ppu.frames_done++;
     n->fe_captured = 0;
     memcpy(n->shown, n->ppu.framebuffer, sizeof n->shown);
+    /* переведённая процедура ушла за конец кадра, которым должен был закончиться этот
+     * вызов nes_run_frame: сворачиваем её сразу, чтобы игра не прочла кнопки следующего
+     * кадра раньше, чем их передали (ход игры от этого не меняется — дальше эмулятор) */
+    if (n->hook_depth > 0 && n->ppu.frames_done > n->frame + 1) { n->xlat_unwind = 1; n->unwinds++; }
 }
 
 static void ppu_advance_to(Nes *n, uint64_t target) {
@@ -501,10 +505,10 @@ static void ppu_advance_to(Nes *n, uint64_t target) {
 void nes_step(Nes *n) {
     uint16_t pc = n->cpu.pc;
     if (n->watch_fn && pc == n->watch_pc) n->watch_fn(n);
-    nes_hook_fn h = nes_find_hook(n, pc);
+    nes_hook_fn h = n->xlat_unwind ? 0 : nes_find_hook(n, pc);   /* при свёртке — только эмулятор */
     if (h) {
         n->hook_calls++;
-        if (n->hook_depth++ == 0) n->hook_frames0 = n->ppu.frames_done;
+        if (n->hook_depth++ == 0) { n->hook_frames0 = n->ppu.frames_done; n->hook_pc0 = pc; }
         h(n);                 /* переведённый код сам отсчитывает такты и оставляет PC, куда вернулся оригинал */
         int stuck = n->xlat_bail && n->cpu.pc == pc;   /* отдал управление, не сделав ни шага */
         n->xlat_bail = 0;     /* если он отдал управление — эмулятор просто продолжает с PC */
