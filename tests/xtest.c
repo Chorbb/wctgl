@@ -134,6 +134,17 @@ static uint16_t prev_pc; static uint8_t prev_y, prev_x; static int prev_bank;
 static void trace_stat(Nes *n) {
     uint16_t pc = n->cpu.pc;
     uint8_t op = nes_read(n, pc), lo = nes_read(n, (uint16_t)(pc + 1)), hi = nes_read(n, (uint16_t)(pc + 2));
+    {
+        static int watch = -2;
+        if (watch == -2) watch = getenv("XT_PC") ? (int)strtol(getenv("XT_PC"), NULL, 16) : -1;
+        if (watch >= 0 && pc == watch) {
+            fprintf(stat_out, "H %04X %d %d %d", pc, n->bank & 7, n->ram[0x51], n->ram[0xB0] | (n->ram[0xB1] << 8));
+            for (int k = 0; k < 16; k++) fprintf(stat_out, " %02X", n->ram[0x4C0 + k]);
+            fprintf(stat_out, "\n");
+            return;
+        }
+        if (watch >= 0) return;
+    }
     if (getenv("XT_CORR")) {
         /* поток данных коридора: начало ($E58F, указатель $18) и каждая команда ($E6F0) */
         if (pc == 0xE58F)
@@ -443,6 +454,7 @@ int main(int argc, char **argv) {
             uint8_t h[9] = { 'T', (uint8_t)si, (uint8_t)(si >> 8), m->fe_ram[0x51], (uint8_t)p290, (uint8_t)(p290 >> 8),
                              (uint8_t)p300, (uint8_t)(p300 >> 8), m->ppu.ctrl };
             fwrite(h, 1, 9, o); fwrite(m->fe_ram, 1, 2048, o); fwrite(m->chr, 1, 8192, o); fwrite(m->ppu.pal, 1, 32, o);
+            fwrite(m->shown, 1, sizeof m->shown, o);     /* как выглядел экран — для сверки картинок */
             recs++;
         }
         fclose(o);
