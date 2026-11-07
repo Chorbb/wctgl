@@ -164,3 +164,28 @@ int tgl_state_load(const uint8_t *buf, int len) {
     deferred = (int)((h.extra >> 8) & 1);
     return 0;
 }
+
+/* Описание сборки ядра: дата сборки, сколько процедур переведено, сколько новых врагов.
+ * Показывается при запуске — сразу видно, какое ядро загружено. */
+static int put(char *buf, int cap, int pos, const char *t) {
+    while (*t && pos < cap - 1) buf[pos++] = *t++;
+    buf[pos] = 0;
+    return pos;
+}
+static int put_num(char *buf, int cap, int pos, int v) {
+    char tmp[12]; int k = 0;
+    if (v == 0) tmp[k++] = '0';
+    while (v > 0 && k < 11) { tmp[k++] = (char)('0' + v % 10); v /= 10; }
+    while (k > 0 && pos < cap - 1) buf[pos++] = tmp[--k];
+    buf[pos] = 0;
+    return pos;
+}
+int tgl_build_info(char *buf, int cap) {
+    if (!buf || cap < 2) return 0;
+    int p = 0;
+    p = put(buf, cap, p, "ядро " __DATE__ " " __TIME__ ", перевод ");
+    p = put_num(buf, cap, p, xlat_count);
+    p = put(buf, cap, p, ", новых врагов ");
+    p = put_num(buf, cap, p, custom_count);
+    return p;
+}

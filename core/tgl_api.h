@@ -51,4 +51,7 @@ TGL_API int tgl_state_size(void);
 TGL_API int tgl_state_save(uint8_t *buf, int cap);
 TGL_API int tgl_state_load(const uint8_t *buf, int len);
 
+/* Описание сборки ядра (UTF-8): дата сборки, число переведённых процедур и новых врагов. */
+TGL_API int tgl_build_info(char *buf, int cap);
+
 #endif

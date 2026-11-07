@@ -30,6 +30,7 @@ public partial class Main : Node2D
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_audio_read(short[] buf, int max);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_patch_rom(int bank, int addr, byte[] data, int len);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_use_translation(int on);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_build_info(byte[] buf, int cap);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_size();
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_save(byte[] buf, int cap);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_load(byte[] buf, int len);
@@ -116,7 +117,10 @@ public partial class Main : Node2D
             return false;
         }
         SaveSetting("rom_path", path);
-        ShowMessage(ApplyMods());
+        string build;
+        try { var b = new byte[256]; int n = tgl_build_info(b, b.Length); build = System.Text.Encoding.UTF8.GetString(b, 0, n); }
+        catch (Exception) { build = "ядро старой сборки (нет tgl_build_info) — обновите native/tglcore.dll"; }
+        ShowMessage(build + "\n" + ApplyMods());
         _msgTimer = 5.0;
         tgl_reset();
         _running = true;
