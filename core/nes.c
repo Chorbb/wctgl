@@ -516,7 +516,8 @@ static void ppu_advance_to(Nes *n, uint64_t target) {
 void nes_step(Nes *n) {
     uint16_t pc = n->cpu.pc;
     if (n->watch_fn && pc == n->watch_pc) n->watch_fn(n);
-    nes_hook_fn h = n->xlat_unwind ? 0 : nes_find_hook(n, pc);   /* при свёртке — только эмулятор */
+    nes_hook_fn h = n->custom_find ? n->custom_find(n, pc) : 0;    /* новые процедуры модов — всегда */
+    if (!h) h = n->xlat_unwind ? 0 : nes_find_hook(n, pc);       /* перевод; при свёртке — только эмулятор */
     if (h) {
         n->hook_calls++;
         if (n->hook_depth++ == 0) { n->hook_frames0 = n->ppu.frames_done; n->hook_pc0 = pc; }

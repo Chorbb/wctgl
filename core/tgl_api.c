@@ -3,6 +3,7 @@
 #include "nes.h"
 #include "tgl_api.h"
 #include "xlat.h"
+#include "custom.h"
 
 #define ROM_MAX (1 << 20)
 static uint8_t rom_copy[ROM_MAX];
@@ -31,6 +32,7 @@ int tgl_load_rom(const uint8_t *rom, int size) {
     if (loaded) {
         nes.frame_end_fn = on_frame_end;
         xlat_register_all(&nes);    /* переведённые процедуры (если ядро собрано с ними) */
+        custom_install(&nes);       /* новые враги модов */
         nes.use_hooks = 1;
         nes.audio_rate = audio_rate;
         nes_reset(&nes);

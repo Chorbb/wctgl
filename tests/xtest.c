@@ -16,6 +16,7 @@
 #include "../core/xlat.h"
 #include "reclog.h"
 #include "snaplog.h"
+#include "../core/custom.h"
 
 /* Источник: запись tgl_logger3/4 (одна последовательность от перезагрузки) или
  * tgl_logger5 (много отрезков, каждый — от своего снимка). */
@@ -37,6 +38,7 @@ static Nes *make_nes_into(Nes *n, const uint8_t *rom, long size) {
     if (!n) {
         n = calloc(1, sizeof(Nes));
         if (nes_load_rom(n, rom, (int)size)) { fprintf(stderr, "rom load error\n"); exit(2); }
+        custom_install(n);           /* новые враги модов (без мода не задействованы) */
     }
     if (cur_snap) {
         snap_apply(n, cur_snap);
