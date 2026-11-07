@@ -9,6 +9,12 @@
 #  define TGL_API __declspec(dllexport)
 #else
 #  define TGL_API __attribute__((visibility("default")))
+/* Переведённый код: 1 = включён (по умолчанию), 0 = всё исполняет эмулятор оригинала.
+ * Игра в обоих режимах идёт одинаково до такта — это проверяет tests/xtest.c. */
+TGL_API void tgl_use_translation(int on);
+/* Сколько процедур игры переведено в этой сборке ядра. */
+TGL_API int tgl_translated_routines(void);
+
 #endif
 
 /* Версия интерфейса: меняется, если меняются функции ниже. */
@@ -25,5 +31,11 @@ TGL_API void tgl_get_frame_rgba(uint8_t *out);
 TGL_API int tgl_frame_count(void);
 /* Чтение оперативной памяти игры (для отладки и будущих инструментов мода). */
 TGL_API int tgl_peek(int addr);
+
+/* Переведённый код: 1 = включён (по умолчанию), 0 = всё исполняет эмулятор оригинала.
+ * Игра в обоих режимах идёт одинаково до такта — это проверяет tests/xtest.c. */
+TGL_API void tgl_use_translation(int on);
+/* Сколько процедур игры переведено в этой сборке ядра. */
+TGL_API int tgl_translated_routines(void);
 
 #endif

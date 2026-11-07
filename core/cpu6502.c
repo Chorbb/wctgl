@@ -63,7 +63,7 @@ void cpu_reset(Cpu *c) {
 }
 
 /* вход в прерывание (NMI или IRQ), 7 тактов */
-static void interrupt(Cpu *c) {
+void cpu_interrupt(Cpu *c) {
     dummy_pc(c); dummy_pc(c);
     cpu_push(c, (uint8_t)(c->pc >> 8));
     cpu_push(c, (uint8_t)c->pc);
@@ -361,5 +361,5 @@ void cpu_step(Cpu *c) {
     }
 
     /* решение о прерывании — по состоянию на предпоследнем такте */
-    if (c->prev_run_irq || c->prev_need_nmi) interrupt(c);
+    if (c->prev_run_irq || c->prev_need_nmi) cpu_interrupt(c);
 }

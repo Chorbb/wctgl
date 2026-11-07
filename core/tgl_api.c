@@ -2,6 +2,7 @@
 #include "rt.h"
 #include "nes.h"
 #include "tgl_api.h"
+#include "xlat.h"
 
 #define ROM_MAX (1 << 20)
 static uint8_t rom_copy[ROM_MAX];
@@ -15,7 +16,11 @@ int tgl_load_rom(const uint8_t *rom, int size) {
     memcpy(rom_copy, rom, (size_t)size);
     int err = nes_load_rom(&nes, rom_copy, size);
     loaded = (err == 0);
-    if (loaded) nes_reset(&nes);
+    if (loaded) {
+        xlat_register_all(&nes);    /* переведённые процедуры (если ядро собрано с ними) */
+        nes.use_hooks = 1;
+        nes_reset(&nes);
+    }
     return err;
 }
 
@@ -46,3 +51,7 @@ int tgl_peek(int addr) {
     if (!loaded) return -1;
     return nes_read(&nes, (uint16_t)(addr & 0x7FF));
 }
+
+void tgl_use_translation(int on) { nes.use_hooks = on ? 1 : 0; }
+
+int tgl_translated_routines(void) { return xlat_count; }

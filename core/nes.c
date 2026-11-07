@@ -205,6 +205,7 @@ static void capture_frame_end(Nes *n) {
         n->fe_pc = n->cpu.pc;
         n->fe_cycle = n->cpu.cycles;
         memcpy(n->fe_ram, n->ram, sizeof n->ram);
+        if (n->frame_end_fn) n->frame_end_fn(n);
     }
 }
 
@@ -235,6 +236,7 @@ static int is_get_cycle(Nes *n) { return (int)((n->cpu.cycles + 1 + (uint64_t)n-
 
 /* Подкачка DMC: остановка, пустой такт, при необходимости выравнивание, чтение. 3–4 такта. */
 static void dma_dmc(Nes *n) {
+    uint64_t c0 = n->cpu.cycles;
     n->dmc.dma_pending = 0;
     halted_cycle(n);                 /* остановка */
     halted_cycle(n);                 /* пустой такт */
@@ -245,10 +247,12 @@ static void dma_dmc(Nes *n) {
     cpu_end_cycle(&n->cpu);
     dmc_deliver(n, b);
     n->cpu.irq_line = n->dmc.irq_flag;
+    n->stall_cycles += n->cpu.cycles - c0;
 }
 
 /* Копирование спрайтов $4014: 513 или 514 тактов. */
 static void dma_oam(Nes *n) {
+    uint64_t c0 = n->cpu.cycles;
     n->oam_dma_pending = 0;
     halted_cycle(n);                           /* остановка */
     if (!is_get_cycle(n)) halted_cycle(n);     /* выравнивание */
@@ -265,6 +269,7 @@ static void dma_oam(Nes *n) {
         cycle_end(n, 0);
         cpu_end_cycle(&n->cpu);
     }
+    n->stall_cycles += n->cpu.cycles - c0;
 }
 
 static uint8_t bus_read(void *ctx, uint16_t a) {
@@ -289,6 +294,16 @@ void nes_idle_cycles(Nes *n, int cycles) {
     for (int i = 0; i < cycles; i++) halted_cycle(n);
 }
 
+void nes_bus_cycle(Nes *n, int is_write) {
+    if (!is_write) {
+        if (n->oam_dma_pending) dma_oam(n);
+        if (n->dmc.dma_pending) dma_dmc(n);
+    }
+    cycle_start(n, !is_write);
+    cycle_end(n, !is_write);
+    cpu_end_cycle(&n->cpu);
+}
+
 /* ---------------------------------------------------------------- загрузка и сброс */
 
 int nes_load_rom(Nes *n, const uint8_t *d, int size) {
@@ -302,7 +317,6 @@ int nes_load_rom(Nes *n, const uint8_t *d, int size) {
     n->prg = (uint8_t *)(d + 16 + trainer);
     n->prg_banks = prg16;
     n->hooks = &g_hooks;
-    for (int i = 0; i < 0x10000; i++) { g_hooks.fn[i] = 0; g_hooks.bank[i] = -1; g_hooks.cycles[i] = 0; }
     cpu_init(&n->cpu, bus_read, bus_write, n);
     n->ppu_offset = -25;    /* измерено по записи Mesen: при -26..-24 такт конца кадра совпадает во всех кадрах */
     n->race_dot = 1;
@@ -332,8 +346,14 @@ void nes_reset(Nes *n) {
 }
 
 void nes_set_hook(Nes *n, int bank, uint16_t addr, nes_hook_fn fn) {
-    n->hooks->fn[addr] = fn;
-    n->hooks->bank[addr] = bank;
+    if (addr >= 0x8000 && addr < 0xC000) n->hooks->banked[bank & 7][addr - 0x8000] = fn;
+    else n->hooks->fixed[addr] = fn;
+}
+
+nes_hook_fn nes_find_hook(Nes *n, uint16_t addr) {
+    if (!n->use_hooks) return 0;
+    if (addr >= 0x8000 && addr < 0xC000) return n->hooks->banked[n->bank & 7][addr - 0x8000];
+    return n->hooks->fixed[addr];
 }
 
 /* ---------------------------------------------------------------- отрисовка строки */
@@ -463,24 +483,26 @@ static void ppu_advance_to(Nes *n, uint64_t target) {
             d = 0;
             sl = (sl + 1) % 262;
             if (sl == 0) p->frame_odd ^= 1;
-            if (sl == 240 && n->frame_end_dot == 0) { p->frame_ended = 1; p->frame_end_time = p->time; }
+            if (sl == 240 && n->frame_end_dot == 0) { p->frame_ended = 1; p->frame_end_time = p->time; p->frames_done++; n->fe_captured = 0; }
         }
-        if (sl == 240 && d == n->frame_end_dot && d > 0) { p->frame_ended = 1; p->frame_end_time = p->time; }
+        if (sl == 240 && d == n->frame_end_dot && d > 0) { p->frame_ended = 1; p->frame_end_time = p->time; p->frames_done++; n->fe_captured = 0; }
         p->dot = d;
         p->scanline = sl;
     }
 }
 
-static void step(Nes *n) {
+void nes_step(Nes *n) {
     uint16_t pc = n->cpu.pc;
     if (n->watch_fn && pc == n->watch_pc) n->watch_fn(n);
-    nes_hook_fn h = n->hooks->fn[pc];
-    if (h && (pc < 0x8000 || pc >= 0xC000 || n->hooks->bank[pc] < 0 || n->hooks->bank[pc] == n->bank)) {
+    nes_hook_fn h = nes_find_hook(n, pc);
+    if (h) {
         n->hook_calls++;
-        h(n);
-        nes_idle_cycles(n, n->hooks->cycles[pc] > 0 ? n->hooks->cycles[pc] : 50);
+        h(n);                 /* переведённый код сам отсчитывает такты и оставляет PC, куда вернулся оригинал */
+        n->xlat_bail = 0;     /* если он отдал управление — эмулятор просто продолжает с PC */
         return;
     }
+    if (n->trace_fn) n->trace_fn(n);
+    n->emu_steps++;
     cpu_step(&n->cpu);
 }
 
@@ -488,8 +510,8 @@ static void step(Nes *n) {
  * endFrame в Mesen. Состояние ровно в этот такт сохраняется в fe_* для сверки;
  * сама функция возвращается на границе инструкции чуть позже. */
 void nes_run_frame(Nes *n) {
+    uint64_t target = n->ppu.frames_done + 1;
     n->ppu.frame_ended = 0;
-    n->fe_captured = 0;
-    while (!n->ppu.frame_ended) step(n);
+    while (n->ppu.frames_done < target) nes_step(n);
     n->frame++;
 }
