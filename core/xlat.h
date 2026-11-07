@@ -22,24 +22,29 @@
 
 /* Шаблон шины инструкции: число тактов и маска тактов записи (бит i = такт i — запись). */
 void xlat_tick(Nes *n, int count, unsigned wmask);
-/* Опрос прерываний после инструкции; next — адрес следующей инструкции (туда вернётся RTI). */
-void xlat_check(Nes *n, uint16_t next);
+/* Опрос прерываний после инструкции; next — адрес следующей инструкции (туда вернётся RTI).
+ * Возвращает 1, если переведённому коду надо выйти (управление у эмулятора). */
+int  xlat_check(Nes *n, uint16_t next);
 /* Такты + опрос: обычный конец инструкции. */
-void xlat_cycles(Nes *n, int count, unsigned wmask, uint16_t next);
+int  xlat_cycles(Nes *n, int count, unsigned wmask, uint16_t next);
 /* Переход JMP на адрес target (такты уже отсчитаны): если там переведённая процедура —
  * вызвать её (она вернётся туда же, куда вернулась бы оригинальная), иначе отдать эмулятору. */
 void xlat_jump(Nes *n, uint16_t target);
 /* Условный переход: 2 такта, +1 если взят, +1 если ещё и сменил страницу.
  * Взятый переход без смены страницы не замечает новый IRQ (как у 6502). */
-void xlat_branch(Nes *n, int taken, uint16_t from_next, uint16_t to);
+int  xlat_branch(Nes *n, int taken, uint16_t from_next, uint16_t to);
 /* Инструкцию по адресу pc (без перехода, следующая — next) исполняет эмулятор:
  * обращения к железу так попадают точно в свой такт. Если после неё пришло прерывание,
  * оно отрабатывается до возврата в next. */
-void xlat_io(Nes *n, uint16_t pc, uint16_t next);
+int  xlat_io(Nes *n, uint16_t pc, uint16_t next);
 /* Вызов процедуры по JSR: адрес возврата уже в стеке, такты JSR отсчитаны.
  * Если процедура переведена — вызывается её функция, иначе её исполняет эмулятор.
  * Возвращает 1, если вернулись как обычно (в ret_next), 0 — если надо отдать управление. */
 int xlat_call(Nes *n, uint16_t target, uint16_t ret_next);
+/* Дальний вызов (JSR на переходник между банками с параметрами после JSR): адрес возврата
+ * в стеке, такты JSR отсчитаны. Переходник исполняет эмулятор; вызываемая процедура, если
+ * она переведена, подхватывается по адресу входа. Возврат — в after (за параметрами). */
+int xlat_far(Nes *n, uint16_t after);
 /* Отдать управление эмулятору с адреса pc (остаток процедуры исполнит он). */
 void xlat_bail_to(Nes *n, uint16_t pc);
 
@@ -51,6 +56,16 @@ static inline uint8_t xlat_rd(Nes *n, uint16_t a) {
 static inline void xlat_wr(Nes *n, uint16_t a, uint8_t v) {
     if (a < 0x2000) { n->ram[a & 0x7FF] = v; return; }
     nes_write(n, a, v);
+}
+
+/* Переведённый код не должен держать управление дольше нескольких кадров (иначе кадр
+ * не вернётся в Godot): тогда всё сворачивается до nes_step, остальное доделает эмулятор.
+ * Вызывается в ожиданиях и на переходах назад. 1 = надо выходить. */
+#define XLAT_MAX_FRAMES 3
+static inline int xlat_stop(Nes *n) {
+    if (!n->xlat_unwind && n->ppu.frames_done - n->hook_frames0 > XLAT_MAX_FRAMES) n->xlat_unwind = 1;
+    if (n->xlat_unwind) { n->xlat_bail = 1; return 1; }
+    return 0;
 }
 
 /* ---- сокращения для сгенерированного кода ---- */
@@ -66,7 +81,12 @@ static inline void xlat_wr(Nes *n, uint16_t a, uint8_t v) {
 #define XPULL()   (XS++, n->ram[0x100 | XS])
 #define XZN(v)    do { uint8_t z_ = (uint8_t)(v); XP = (uint8_t)((XP & 0x7D) | (z_ ? 0 : 0x02) | (z_ & 0x80)); } while (0)
 #define XCROSS(a, b) ((((a) ^ (b)) & 0xFF00) != 0)
-#define XCYC(cnt, wm, next) xlat_cycles(n, (cnt), (wm), (uint16_t)(next))
+/* каждая из них возвращает 1, если пришлось отдать управление (прерывание ушло не туда,
+ * слишком долго) — тогда переведённая функция сразу выходит */
+#define XCYC(cnt, wm, next) if (xlat_cycles(n, (cnt), (wm), (uint16_t)(next))) return
+#define XBR(...)  if (xlat_branch(n, __VA_ARGS__)) return
+#define XIOX(...) if (xlat_io(n, __VA_ARGS__)) return
+#define XCHK(at)  if (xlat_check(n, (uint16_t)(at))) return
 /* трассировка (для поиска расхождений): перед каждой инструкцией, как у эмулятора */
 #ifdef XLAT_NOTRACE
 #define XT(at) ((void)0)
@@ -101,7 +121,8 @@ void xlat_register_all(Nes *n);
 typedef struct XlatInfo {
     int bank;            /* банк для $8000-$BFFF, иначе -1 */
     uint16_t entry;      /* адрес входа */
-    int kind;            /* 0 = вызывается по JSR, 1 = обработчик прерывания (RTI) */
+    int kind;            /* 0 = вызывается по JSR, 1 = обработчик прерывания (RTI),
+                          * 2 = круг бесконечного цикла (вход — начало круга, выход — возврат к нему) */
     int bytes;           /* сколько байт кода покрывает перевод */
     nes_hook_fn fn;
     const char *name;

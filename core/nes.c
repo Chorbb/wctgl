@@ -448,6 +448,13 @@ static void inc_y(Ppu *p) {
  * к своим регистрам и после каждой инструкции. Так прерывание кадра (NMI) приходит
  * на ту же инструкцию, что и в оригинале, — от этого зависит генератор случайных чисел игры. */
 
+/* кадр закончен (начало строки 240): строки 0-239 нарисованы — снимок для показа */
+static void frame_done(Nes *n) {
+    n->ppu.frames_done++;
+    n->fe_captured = 0;
+    memcpy(n->shown, n->ppu.framebuffer, sizeof n->shown);
+}
+
 static void ppu_advance_to(Nes *n, uint64_t target) {
     Ppu *p = &n->ppu;
     while (p->time < target) {
@@ -483,9 +490,9 @@ static void ppu_advance_to(Nes *n, uint64_t target) {
             d = 0;
             sl = (sl + 1) % 262;
             if (sl == 0) p->frame_odd ^= 1;
-            if (sl == 240 && n->frame_end_dot == 0) { p->frame_ended = 1; p->frame_end_time = p->time; p->frames_done++; n->fe_captured = 0; }
+            if (sl == 240 && n->frame_end_dot == 0) { p->frame_ended = 1; p->frame_end_time = p->time; frame_done(n); }
         }
-        if (sl == 240 && d == n->frame_end_dot && d > 0) { p->frame_ended = 1; p->frame_end_time = p->time; p->frames_done++; n->fe_captured = 0; }
+        if (sl == 240 && d == n->frame_end_dot && d > 0) { p->frame_ended = 1; p->frame_end_time = p->time; frame_done(n); }
         p->dot = d;
         p->scanline = sl;
     }
@@ -497,12 +504,15 @@ void nes_step(Nes *n) {
     nes_hook_fn h = nes_find_hook(n, pc);
     if (h) {
         n->hook_calls++;
+        if (n->hook_depth++ == 0) n->hook_frames0 = n->ppu.frames_done;
         h(n);                 /* переведённый код сам отсчитывает такты и оставляет PC, куда вернулся оригинал */
+        int stuck = n->xlat_bail && n->cpu.pc == pc;   /* отдал управление, не сделав ни шага */
         n->xlat_bail = 0;     /* если он отдал управление — эмулятор просто продолжает с PC */
-        return;
+        if (--n->hook_depth == 0) n->xlat_unwind = 0;
+        if (!stuck) return;   /* иначе эту инструкцию исполнит эмулятор, иначе зациклимся */
     }
-    if (n->trace_fn) n->trace_fn(n);
     n->emu_steps++;
+    if (n->trace_fn) n->trace_fn(n);
     cpu_step(&n->cpu);
 }
 
@@ -510,7 +520,9 @@ void nes_step(Nes *n) {
  * endFrame в Mesen. Состояние ровно в этот такт сохраняется в fe_* для сверки;
  * сама функция возвращается на границе инструкции чуть позже. */
 void nes_run_frame(Nes *n) {
-    uint64_t target = n->ppu.frames_done + 1;
+    /* переведённая процедура может пройти через конец кадра и вернуться позже —
+     * тогда следующий вызов догонит счёт кадров, а не сдвинет игру на кадр */
+    uint64_t target = n->frame + 1;
     n->ppu.frame_ended = 0;
     while (n->ppu.frames_done < target) nes_step(n);
     n->frame++;

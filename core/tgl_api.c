@@ -8,6 +8,10 @@
 static uint8_t rom_copy[ROM_MAX];
 static Nes nes;
 static int loaded;
+static uint8_t pending_buttons;
+
+/* кнопки вступают в силу ровно в такт конца кадра — одинаково с переводом и без него */
+static void on_frame_end(Nes *n) { n->pad_state = pending_buttons; }
 
 int tgl_api_version(void) { return 1; }
 
@@ -17,6 +21,7 @@ int tgl_load_rom(const uint8_t *rom, int size) {
     int err = nes_load_rom(&nes, rom_copy, size);
     loaded = (err == 0);
     if (loaded) {
+        nes.frame_end_fn = on_frame_end;
         xlat_register_all(&nes);    /* переведённые процедуры (если ядро собрано с ними) */
         nes.use_hooks = 1;
         nes_reset(&nes);
@@ -30,14 +35,14 @@ void tgl_reset(void) {
 
 void tgl_run_frame(int buttons) {
     if (!loaded) return;
-    nes.pad_state = (uint8_t)buttons;
+    pending_buttons = (uint8_t)buttons;
     nes_run_frame(&nes);
 }
 
 void tgl_get_frame_rgba(uint8_t *out) {
     if (!out) return;
     for (int i = 0; i < NES_SCREEN_W * NES_SCREEN_H; i++) {
-        uint32_t c = NES_PALETTE[nes.ppu.framebuffer[i] & 63];
+        uint32_t c = NES_PALETTE[nes.shown[i] & 63];
         out[i * 4 + 0] = (uint8_t)(c >> 16);
         out[i * 4 + 1] = (uint8_t)(c >> 8);
         out[i * 4 + 2] = (uint8_t)c;
@@ -49,7 +54,7 @@ int tgl_frame_count(void) { return (int)nes.frame; }
 
 int tgl_peek(int addr) {
     if (!loaded) return -1;
-    return nes_read(&nes, (uint16_t)(addr & 0x7FF));
+    return nes.fe_ram[addr & 0x7FF];   /* память в такт конца последнего кадра */
 }
 
 void tgl_use_translation(int on) { nes.use_hooks = on ? 1 : 0; }

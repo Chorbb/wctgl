@@ -10,7 +10,10 @@ int main(int argc, char **argv) {
     static uint8_t rom[1 << 20];
     int size = (int)fread(rom, 1, sizeof rom, f);
     fclose(f);
+    int mode = argc > 3 ? atoi(argv[3]) : 1;
     printf("api version %d, load %d\n", tgl_api_version(), tgl_load_rom(rom, size));
+    tgl_use_translation(mode);
+    printf("translation %s, %d routines\n", mode ? "on" : "off", tgl_translated_routines());
     /* титульный экран → Start → Start → игра, держим «огонь» */
     for (int i = 1; i <= 900; i++) {
         int b = 0;

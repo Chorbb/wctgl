@@ -75,6 +75,16 @@ static void trace_cov(Nes *n) {
     if (b >= 0) cov[b * 0x10000 + pc] = 1;
 }
 
+static void trace_prof(Nes *n) {
+    /* XT из переведённого кода тоже зовёт trace_fn — считаем только эмулятор */
+    static uint64_t last;
+    if (n->emu_steps == last) return;
+    last = n->emu_steps;
+    uint16_t pc = n->cpu.pc;
+    int b = pc >= 0xC000 ? 7 : (pc >= 0x8000 ? (n->bank & 7) : -1);
+    if (b >= 0) ((uint32_t *)cov)[b * 0x10000 + pc]++;
+}
+
 /* ---------------------------------------------------------------- проверка процедур */
 
 /* трасса: состояние перед каждой инструкцией */
@@ -102,19 +112,45 @@ static int find_info(Nes *n, uint16_t pc) {
     return -1;
 }
 
-/* до возврата: стек поднялся до s_ret */
+/* до возврата: стек поднялся до s_ret; для круга цикла (loop_pc) — до возврата к его началу */
+static int loop_pc = -1;
 static void finish(Nes *n, uint8_t s_ret) {
+    if (loop_pc >= 0) {
+        uint16_t head = (uint16_t)loop_pc;
+        loop_pc = -1;
+        do nes_step(n); while (!(n->cpu.pc == head && n->cpu.s == s_ret) && !n->cpu.jammed);
+        return;
+    }
     while ((uint8_t)(n->cpu.s - s_ret) >= 0x80 && !n->cpu.jammed) nes_step(n);
+}
+
+static void finish_x(Nes *n, uint8_t s_ret, const XlatInfo *x) {
+    /* перевод отдал управление прямо на входе: первую инструкцию исполняет эмулятор
+     * (как в nes_step), иначе перехват на том же адресе вызовется снова */
+    if (n->cpu.pc == x->entry && n->use_hooks) { n->emu_steps++; if (n->trace_fn) n->trace_fn(n); cpu_step(&n->cpu); }
+    if (x->kind == 2) loop_pc = x->entry;
+    finish(n, s_ret);
+}
+
+/* после перевода: если процедура не дошла до своего возврата (отдала управление или
+ * свернулась по времени) — доисполнить эмулятором. Судим по стеку, а не по флагам. */
+static void complete(Nes *n, uint8_t s_ret, const XlatInfo *x) {
+    int bailed = n->xlat_bail;
+    n->xlat_bail = 0;
+    if (n->xlat_unwind) { n->xlat_unwind = 0; n->hook_frames0 = n->ppu.frames_done; }
+    int done = x->kind == 2 ? (n->cpu.pc == x->entry && n->cpu.s == s_ret && !bailed)
+                            : (uint8_t)(n->cpu.s - s_ret) < 0x80;
+    if (!done) finish_x(n, s_ret, x);
 }
 
 static void check_wrapper(Nes *n) {
     int i = find_info(n, n->cpu.pc);
     if (i < 0) { fprintf(stderr, "нет процедуры для $%04X\n", n->cpu.pc); exit(3); }
     const XlatInfo *x = &xlat_table[i];
-    uint8_t s_ret = (uint8_t)(n->cpu.s + (x->kind ? 3 : 2));
+    uint8_t s_ret = (uint8_t)(n->cpu.s + (x->kind == 1 ? 3 : x->kind == 0 ? 2 : 0));
     if (checking) {                 /* вложенный вызов внутри проверки: просто перевод */
         x->fn(n);
-        if (n->xlat_bail) { n->xlat_bail = 0; finish(n, s_ret); }
+        complete(n, s_ret, x);
         return;
     }
     static Nes ref, *saved;
@@ -124,11 +160,11 @@ static void check_wrapper(Nes *n) {
     ref.cpu.ctx = &ref;
     ref.use_hooks = 0;
     uint64_t f0 = n->ppu.frames_done;
-    finish(&ref, s_ret);
+    finish_x(&ref, s_ret, x);
 
     checking = 1;
     x->fn(n);
-    if (n->xlat_bail) { n->xlat_bail = 0; finish(n, s_ret); }
+    complete(n, s_ret, x);
     checking = 0;
 
     checks++; per_fn_calls[i]++;
@@ -144,10 +180,10 @@ static void check_wrapper(Nes *n) {
                 static Nes a, b; static Tr *ta, *tb; int na, nb;
                 if (!tr_buf) tr_buf = malloc(sizeof(Tr) * (size_t)tr_cap);
                 a = *saved; a.cpu.ctx = &a; a.use_hooks = 0; a.trace_fn = trace_rec;
-                tr_n = 0; finish(&a, s_ret); na = tr_n;
+                tr_n = 0; finish_x(&a, s_ret, x); na = tr_n;
                 ta = malloc(sizeof(Tr) * (size_t)na); memcpy(ta, tr_buf, sizeof(Tr) * (size_t)na);
                 b = *saved; b.cpu.ctx = &b; b.trace_fn = trace_rec;
-                tr_n = 0; checking = 1; x->fn(&b); if (b.xlat_bail) { b.xlat_bail = 0; finish(&b, s_ret); } checking = 0;
+                tr_n = 0; checking = 1; x->fn(&b); complete(&b, s_ret, x); checking = 0;
                 nb = tr_n; tb = tr_buf;
                 int k = 0;
                 while (k < na && k < nb && !memcmp(&ta[k], &tb[k], sizeof(Tr))) k++;
@@ -209,6 +245,25 @@ int main(int argc, char **argv) {
         for (int i = 0; i < xlat_count; i++)
             printf("  %-14s %8ld calls %6ld bad\n", xlat_table[i].name, per_fn_calls[i], per_fn_fail[i]);
         return check_fail ? 1 : 0;
+    }
+
+    if (!strcmp(mode, "profile")) {
+        /* где эмулятор тратит инструкции при включённом переводе: кандидаты на перевод.
+         * Каждая инструкция приписывается процедуре — последнему JSR-входу в стеке вызовов. */
+        cov = calloc(8 * 0x10000, sizeof(uint32_t));
+        Nes *n = make_nes(rom, rom_size);
+        xlat_register_all(n);
+        n->use_hooks = 1;
+        n->trace_fn = trace_prof;
+        for (int f = 0; f < frames; f++) nes_run_frame(n);
+        uint32_t *c = (uint32_t *)cov;
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/profile.txt", "w");
+        for (int b = 0; b < 8; b++)
+            for (int a = 0x8000; a < 0x10000; a++)
+                if (c[b * 0x10000 + a]) fprintf(o, "P %d %04X %u\n", b, a, c[b * 0x10000 + a]);
+        fclose(o);
+        printf("profile: emulated %llu instructions\n", (unsigned long long)n->emu_steps);
+        return 0;
     }
 
     if (!strcmp(mode, "game")) {

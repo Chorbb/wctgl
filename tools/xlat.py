@@ -50,6 +50,8 @@ class Gen:
         self.rom = rom
         self.cov = coverage            # set of (bank, addr)
         self.nonproc = set()           # адреса переходников (не обычных процедур)
+        self.loop_entry = None
+        self.far = set()               # переходники дальнего вызова: JSR far / .byte банк, адрес-1 (2 байта)
 
     def bank_of(self, addr, bank):
         return bank if 0x8000 <= addr < 0xC000 else 7
@@ -82,6 +84,9 @@ class Gen:
             nxt = (pc + size) & 0xFFFF
             if mn in BRANCHES:
                 todo += [nxt, (nxt + (v - 256 if v > 127 else v)) & 0xFFFF]
+            elif mn == 'JSR' and v in self.far:
+                calls.add(('far',) + self.far_target(bank, pc))
+                todo.append((pc + 6) & 0xFFFF)          # после трёх байт параметров
             elif mn == 'JSR':
                 calls.add(v)
                 todo.append(nxt)
@@ -94,6 +99,13 @@ class Gen:
             if len(seen) > 3000:
                 break
         return seen, calls
+
+    def far_target(self, bank, pc):
+        """Параметры дальнего вызова после JSR: банк, затем адрес входа минус 1 (переходник
+        переходит туда через RTS)."""
+        b = self.rom.byte(bank, (pc + 3) & 0xFFFF) & 7
+        t = (self.rom.byte(bank, (pc + 4) & 0xFFFF) | self.rom.byte(bank, (pc + 5) & 0xFFFF) << 8) + 1
+        return b, t & 0xFFFF
 
     def is_procedure(self, bank, entry, kind):
         """Обычная ли это процедура: стек внутри неё сбалансирован и выход — по RTS (RTI)
@@ -128,7 +140,13 @@ class Gen:
                 continue
             if mn in BRANCHES:
                 todo += [(nxt, dep), ((nxt + (v - 256 if v > 127 else v)) & 0xFFFF, dep)]
+            elif mn == 'JSR' and v in self.far:
+                todo.append(((pc + 6) & 0xFFFF, dep))
             elif mn == 'JMP' and mode == 'abs':
+                if kind == 'loop' and v == entry:
+                    if dep != 0:
+                        return False
+                    continue
                 todo.append((v, dep))
             elif mn in ('BRK',) or (mn == 'JMP' and mode == 'ind'):
                 continue
@@ -168,7 +186,11 @@ class Gen:
         out = []
 
         def goto(addr):
+            if self.loop_entry is not None and addr == self.loop_entry:
+                return 'return;'        # круг цикла закончен: следующий круг начнётся с nes_step
             if addr in body and body[addr] is not None:
+                if addr <= pc:              # переход назад: цикл — не держать управление слишком долго
+                    return 'if (xlat_stop(n)) return; goto L_%04X;' % addr
                 return 'goto L_%04X;' % addr
             return 'xlat_bail_to(n, %s); return;' % h4(addr)
 
@@ -176,7 +198,7 @@ class Gen:
             return 0x2000 <= addr < 0x4020
 
         if mn.endswith('*'):                         # неофициальные — эмулятором
-            out.append('xlat_io(n, %s, %s); %s' % (h4(pc), h4(nxt), goto(nxt)))
+            out.append('XIOX(%s, %s); %s' % (h4(pc), h4(nxt), goto(nxt)))
             return out
 
         # ---- управление
@@ -184,15 +206,25 @@ class Gen:
             mask, setv = BRANCHES[mn]
             to = (nxt + (v - 256 if v > 127 else v)) & 0xFFFF
             cond = '(XP & %s)' % mask if setv else '!(XP & %s)' % mask
-            out.append('if (%s) { xlat_branch(n, 1, %s, %s); %s }' % (cond, h4(nxt), h4(to), goto(to)))
-            out.append('xlat_branch(n, 0, %s, %s); %s' % (h4(nxt), h4(to), goto(nxt)))
+            out.append('if (%s) { XBR(1, %s, %s); %s }' % (cond, h4(nxt), h4(to), goto(to)))
+            out.append('XBR(0, %s, %s); %s' % (h4(nxt), h4(to), goto(nxt)))
             return out
         if mn == 'JMP' and mode == 'abs':
             out.append('XCYC(3, 0, %s);' % h4(v))
-            if v in body and body[v] is not None:
-                out.append('goto L_%04X;' % v)
+            if self.loop_entry is not None and v == self.loop_entry:
+                out.append('return;')
+            elif v in body and body[v] is not None:
+                out.append(('if (xlat_stop(n)) return; ' if v <= pc else '') + 'goto L_%04X;' % v)
             else:
                 out.append('xlat_jump(n, %s); return;' % h4(v))
+            return out
+        if mn == 'JSR' and v in self.far:
+            # дальний вызов: переходник исполняет эмулятор, вызываемая процедура в другом
+            # банке подхватывается своим переводом (если он есть) по адресу входа
+            ret = (pc + 2) & 0xFFFF
+            after = (pc + 6) & 0xFFFF
+            out.append('XPUSH(%s); XPUSH(%s); XCYC(6, 0b11000, %s);' % (h4(ret >> 8), h4(ret & 0xFF), h4(v)))
+            out.append('if (!xlat_far(n, %s)) return; %s' % (h4(after), goto(after)))
             return out
         if mn == 'JSR' and v in self.nonproc:
             out.append('xlat_bail_to(n, %s); return;' % h4(pc))
@@ -209,7 +241,7 @@ class Gen:
         if mn == 'RTI':
             out.append('{ xlat_tick(n, 4, 0); XP = (uint8_t)((XPULL() & ~0x10) | 0x20); uint8_t lo_ = XPULL(); '
                        'uint8_t hi_ = XPULL(); uint16_t r_ = (uint16_t)(lo_ | (hi_ << 8)); n->cpu.pc = r_; '
-                       'xlat_tick(n, 2, 0); xlat_check(n, r_); } return;')
+                       'xlat_tick(n, 2, 0); XCHK(r_); } return;')
             return out
         if mn == 'BRK' or (mn == 'JMP' and mode == 'ind'):
             out.append('xlat_bail_to(n, %s); return;' % h4(pc))
@@ -220,7 +252,7 @@ class Gen:
             if mn in FLAG_OPS:
                 out.append('%s XCYC(2, 0, %s);' % (FLAG_OPS[mn], h4(nxt)))
             elif mn in IFLAG_OPS:      # флаг I меняется после тактов (как у 6502)
-                out.append('n->cpu.pc = %s; xlat_tick(n, 2, 0); %s xlat_check(n, %s);' % (h4(nxt), IFLAG_OPS[mn], h4(nxt)))
+                out.append('n->cpu.pc = %s; xlat_tick(n, 2, 0); %s XCHK(%s);' % (h4(nxt), IFLAG_OPS[mn], h4(nxt)))
             elif mn in REG_OPS:
                 out.append('%s XCYC(2, 0, %s);' % (REG_OPS[mn], h4(nxt)))
             elif mode == 'acc' or mn in ACC_OPS and mode == 'acc':
@@ -232,10 +264,10 @@ class Gen:
             elif mn == 'PLA':
                 out.append('XA = XPULL(); XZN(XA); XCYC(4, 0, %s);' % h4(nxt))
             elif mn == 'PLP':
-                out.append('n->cpu.pc = %s; xlat_tick(n, 4, 0); XP = (uint8_t)((XPULL() & ~0x10) | 0x20); xlat_check(n, %s);'
+                out.append('n->cpu.pc = %s; xlat_tick(n, 4, 0); XP = (uint8_t)((XPULL() & ~0x10) | 0x20); XCHK(%s);'
                            % (h4(nxt), h4(nxt)))
             else:
-                out.append('xlat_io(n, %s, %s);' % (h4(pc), h4(nxt)))
+                out.append('XIOX(%s, %s);' % (h4(pc), h4(nxt)))
             out.append(goto(nxt))
             return out
 
@@ -247,17 +279,17 @@ class Gen:
         # ---- с операндом в памяти
         pre, addr, base, risky = self.ea(mode, v)
         if mode in ('zp', 'abs') and io_static(v):
-            out.append('xlat_io(n, %s, %s); %s' % (h4(pc), h4(nxt), goto(nxt)))
+            out.append('XIOX(%s, %s); %s' % (h4(pc), h4(nxt), goto(nxt)))
             return out
         if mode == 'abs' and v >= 0x8000 and mn in WRITE_OPS | RMW_OPS:
             pass                                       # запись в маппер — обычная запись через шину
         io_check = ''
         if risky:
             if base:
-                io_check = ('if (XIO(a_) || XIO((uint16_t)((b_ & 0xFF00) | (a_ & 0xFF)))) { xlat_io(n, %s, %s); %s } '
+                io_check = ('if (XIO(a_) || XIO((uint16_t)((b_ & 0xFF00) | (a_ & 0xFF)))) { XIOX(%s, %s); %s } '
                             % (h4(pc), h4(nxt), goto(nxt)))
             else:
-                io_check = 'if (XIO(a_)) { xlat_io(n, %s, %s); %s } ' % (h4(pc), h4(nxt), goto(nxt))
+                io_check = 'if (XIO(a_)) { XIOX(%s, %s); %s } ' % (h4(pc), h4(nxt), goto(nxt))
         rd = ('XZP(%s)' % addr) if mode in ('zp', 'zpx', 'zpy') else 'XRD(%s)' % addr
         if mn in READ_OPS:
             cnt, wm = READ_CYC[mode]
@@ -282,7 +314,7 @@ class Gen:
                 body_ = 'uint8_t m_ = XRD(%s); XWR(%s, m_); m_ = %s;%s XWR(%s, m_);' % (addr, addr, f, zn, addr)
             out.append('{ %s%s%s XCYC(%d, %d, %s); } %s' % (pre, io_check, body_, cnt, wm, h4(nxt), goto(nxt)))
             return out
-        out.append('xlat_io(n, %s, %s); %s' % (h4(pc), h4(nxt), goto(nxt)))
+        out.append('XIOX(%s, %s); %s' % (h4(pc), h4(nxt), goto(nxt)))
         return out
 
     @staticmethod
@@ -295,7 +327,8 @@ class Gen:
             'BIT': 'xlat_bit(n, %s);',
         }[mn] % m
 
-    def function(self, bank, entry, name):
+    def function(self, bank, entry, name, kind='jsr'):
+        self.loop_entry = entry if kind == 'loop' else None
         body, calls = self.body(bank, entry)
         lines = ['/* %s: банк %s, вход $%04X */' % (name, bank if 0x8000 <= entry < 0xC000 else 'fix', entry),
                  'static void %s(Nes *n) {' % name]
@@ -335,10 +368,12 @@ def load_coverage(path):
 def main():
     rom = Rom(sys.argv[1])
     cov = load_coverage(sys.argv[2])
-    want = []
+    want, far_entries = [], []
     for line in open(sys.argv[3]):
         line = line.split('#')[0].split()
-        if len(line) >= 3:
+        if len(line) == 2 and line[0] == 'far':
+            far_entries.append(int(line[1], 16))
+        elif len(line) >= 3:
             want.append((int(line[0]), int(line[1], 16), line[2], line[3] if len(line) > 3 else None))
     closure = '--closure' in sys.argv
     exclude = set()
@@ -349,6 +384,7 @@ def main():
                 exclude.add((int(b), int(ad, 16)))
 
     g = Gen(rom, cov)
+    g.far = set(far_entries)
     done, order, out_fns, total, skipped = {}, list(want), [], 0, []
     while order:
         bank, entry, kind, name = order.pop(0)
@@ -362,11 +398,18 @@ def main():
             g.nonproc.add(entry)
             skipped.append(name)
             continue
-        _, calls = g.body(key[0], entry)
+        body_, calls = g.body(key[0], entry)
+        first = body_.get(entry)
+        if first is None or (first[0] == 'JSR' and first[3] in g.nonproc) or first[0] == 'BRK' \
+                or (first[0] == 'JMP' and first[1] == 'ind'):
+            skipped.append(name)            # сразу отдал бы управление: переводить нечего
+            continue
         done[key] = (name, kind, 0)
         if closure:
-            for t in sorted(calls):
-                if 0x8000 <= t < 0xC000:
+            for t in sorted(calls, key=lambda c: (1, c[1], c[2]) if isinstance(c, tuple) else (0, c, 0)):
+                if isinstance(t, tuple):            # дальний вызов: банк известен из параметров
+                    order.append((t[1], t[2], 'jsr', None))
+                elif 0x8000 <= t < 0xC000:
                     # банк вызываемой процедуры: тот, в котором она исполнялась
                     for b in range(7):
                         if (b, t) in cov:
@@ -379,7 +422,7 @@ def main():
         if key[1] in g.nonproc:
             skipped.append(done.pop(key)[0])
     for key, (name, kind, _) in list(done.items()):
-        code, _, nbytes = g.function(key[0], key[1], name)
+        code, _, nbytes = g.function(key[0], key[1], name, kind)
         done[key] = (name, kind, nbytes)
         out_fns.append(code)
         total += nbytes
@@ -393,14 +436,14 @@ def main():
         f.write('const XlatInfo xlat_table[] = {\n')
         for (bank, entry), (name, kind, nb) in done.items():
             f.write('    { %d, 0x%04X, %d, %d, %s, "%s" },\n'
-                    % (bank if 0x8000 <= entry < 0xC000 else -1, entry, 1 if kind == 'irq' else 0, nb, name, name))
+                    % (bank if 0x8000 <= entry < 0xC000 else -1, entry, {'jsr': 0, 'irq': 1, 'loop': 2}[kind], nb, name, name))
         f.write('};\nconst int xlat_count = %d;\n\n' % len(done))
         f.write('void xlat_register_all(Nes *n) {\n')
         for (bank, entry), (name, kind, nb) in done.items():
             f.write('    nes_set_hook(n, %d, 0x%04X, %s);\n' % (bank, entry, name))
         f.write('}\n')
     print('translated %d routines, %d bytes of code; left to emulator (stack tricks): %s'
-          % (len(done), total, ', '.join(skipped) or '-'))
+          % (len(done), total, ', '.join(sorted(set(skipped))) or '-'))
 
 
 if __name__ == '__main__':

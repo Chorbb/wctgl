@@ -1,2 +1,6 @@
 # Процедуры для перевода: <банк> <адрес> <jsr|irq> [имя]. Вызываемые ими добавляются сами (--closure).
 7 DC75 irq nmi_handler
+far C006
+far D76F
+7 FF7A loop main_loop
+7 DCF3 irq irq_handler
