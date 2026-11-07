@@ -7,6 +7,7 @@
 // Управление:  стрелки/WASD — крестовина, Z — B (огонь), X — A (доп. оружие),
 //              Enter — Start, Shift — Select, F5 — Reset, M — звук вкл/выкл,
 //              F7 — перечитать моды и начать заново, Esc — выход.
+// Сохранения:  F2 — сохранить, F4 — загрузить, F3 — следующая ячейка (1-3).
 // Моды: файлы *.tglpatch в папке mods рядом с проектом (собираются tools/mod.py из .tglmod).
 // Геймпад:     крестовина/левый стик, нижняя кнопка — B, правая — A, Start, Back/Select.
 
@@ -29,6 +30,9 @@ public partial class Main : Node2D
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_audio_read(short[] buf, int max);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_patch_rom(int bank, int addr, byte[] data, int len);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_use_translation(int on);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_size();
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_save(byte[] buf, int cap);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_load(byte[] buf, int len);
 
     // Где искать ROM по умолчанию. Если файла нет, откроется окно выбора, путь запомнится.
     const string DefaultRomPath = "C:/TGL_claude/rom/Guardian Legend, The (USA).nes";
@@ -72,7 +76,7 @@ public partial class Main : Node2D
         {
             SetupNativeLibrary();
             int ver = tgl_api_version();
-            if (ver != 3) { ShowMessage($"Неожиданная версия tglcore.dll: {ver} (нужна 3). Обновите native/tglcore.dll."); return; }
+            if (ver != 4) { ShowMessage($"Неожиданная версия tglcore.dll: {ver} (нужна 4). Обновите native/tglcore.dll."); return; }
         }
         catch (Exception e)
         {
@@ -120,6 +124,39 @@ public partial class Main : Node2D
     }
 
     double _msgTimer;
+    int _slot = 1;
+
+    void Flash(string text) { ShowMessage(text); _msgTimer = 2.5; }
+
+    string SlotPath() => ProjectSettings.GlobalizePath($"user://save_{_slot}.tglstate");
+
+    // Сохранение — снимок всего состояния приставки. Привязано к сборке ядра и к ROM с модами:
+    // после их смены старое сохранение не загрузится (ядро откажет, игра не испортится).
+    void SaveState()
+    {
+        var buf = new byte[tgl_state_size()];
+        int n = tgl_state_save(buf, buf.Length);
+        if (n <= 0) { Flash("Не удалось сохранить"); return; }
+        System.IO.File.WriteAllBytes(SlotPath(), buf);
+        Flash($"Сохранено в ячейку {_slot}");
+    }
+
+    void LoadState()
+    {
+        string path = SlotPath();
+        if (!System.IO.File.Exists(path)) { Flash($"Ячейка {_slot} пуста"); return; }
+        byte[] buf = System.IO.File.ReadAllBytes(path);
+        int e = tgl_state_load(buf, buf.Length);
+        string why = e switch
+        {
+            0 => $"Загружено из ячейки {_slot}",
+            -3 => "Сохранение от другой версии ядра — не загружено",
+            -4 => "Сохранение с другим ROM или модами — не загружено",
+            _ => "Файл не похож на сохранение — не загружено",
+        };
+        if (e == 0) { _acc = 0; _playback?.ClearBuffer(); }
+        Flash(why);
+    }
 
     // Моды: каждая строка .tglpatch — «банк адрес байты…» (hex), «translation off» или комментарий «#».
     // Правки ложатся на копию ROM в ядре; файл ROM на диске не меняется.
@@ -206,6 +243,9 @@ public partial class Main : Node2D
         {
             if (k.Keycode == Key.F5 && _running) tgl_reset();
             if (k.Keycode == Key.M) _muted = !_muted;
+            if (k.Keycode == Key.F3) Flash($"Ячейка сохранения: {_slot = _slot % 3 + 1}");
+            if (k.Keycode == Key.F2 && _running) SaveState();
+            if (k.Keycode == Key.F4 && _running) LoadState();
             if (k.Keycode == Key.F7 && _running)
             {
                 _running = false;                       // ROM заново (без старых правок) + моды

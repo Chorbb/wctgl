@@ -4,7 +4,7 @@ CFLAGS ?= -O2 -Wall -Wextra -Wno-array-bounds
 CORE = core/cpu6502.c core/nes.c core/apu.c core/rt.c
 BUILD = build
 
-all: $(BUILD)/cpu_smoke $(BUILD)/replay $(BUILD)/boot $(BUILD)/api_test $(BUILD)/xtest_base
+all: $(BUILD)/cpu_smoke $(BUILD)/replay $(BUILD)/boot $(BUILD)/api_test $(BUILD)/state_test $(BUILD)/xtest_base
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -21,6 +21,9 @@ $(BUILD)/boot: tests/boot.c $(CORE) core/*.h | $(BUILD)
 # переведённый код, если он сгенерирован (make coverage gen), иначе ядро без перевода
 XLAT_SRC = core/xlat.c $(if $(wildcard $(BUILD)/gen/xlat_gen.c),$(BUILD)/gen/xlat_gen.c,core/xlat_none.c)
 XLAT_CFLAGS = -Wno-unused-label -Wno-misleading-indentation -Icore
+
+$(BUILD)/state_test: tests/state_test.c core/tgl_api.c $(XLAT_SRC) $(CORE) core/*.h | $(BUILD)
+	$(CC) $(CFLAGS) $(XLAT_CFLAGS) -o $@ tests/state_test.c core/tgl_api.c $(XLAT_SRC) $(CORE)
 
 $(BUILD)/api_test: tests/api_test.c core/tgl_api.c $(XLAT_SRC) $(CORE) core/*.h | $(BUILD)
 	$(CC) $(CFLAGS) $(XLAT_CFLAGS) -o $@ tests/api_test.c core/tgl_api.c $(XLAT_SRC) $(CORE)

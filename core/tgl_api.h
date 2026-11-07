@@ -11,7 +11,7 @@
 #  define TGL_API __attribute__((visibility("default")))
 #endif
 
-/* Версия интерфейса: меняется, если меняются функции ниже. 2 — звук, 3 — правка ROM (моды). */
+/* Версия интерфейса: меняется, если меняются функции ниже. 2 — звук, 3 — правка ROM (моды), 4 — сохранения. */
 TGL_API int tgl_api_version(void);
 /* Загрузить ROM (копируется внутрь) и перезагрузить игру. 0 = успех, <0 = ошибка формата. */
 TGL_API int tgl_load_rom(const uint8_t *rom, int size);
@@ -43,5 +43,12 @@ TGL_API int tgl_audio_read(int16_t *out, int max);
  * Правка копии ROM в памяти: банк 0..7, адрес процессора, байты. 0 = успех.
  * После правок вызовите tgl_reset(), чтобы игра началась с ними. */
 TGL_API int tgl_patch_rom(int bank, int addr, const uint8_t *data, int len);
+
+/* ---- сохранения (версия 4) ----
+ * Размер снимка; сохранить в буфер (возвращает размер или <0); загрузить (0 = успех,
+ * -2 не сохранение, -3 другая сборка ядра, -4 другой ROM или моды). Вызывать между кадрами. */
+TGL_API int tgl_state_size(void);
+TGL_API int tgl_state_save(uint8_t *buf, int cap);
+TGL_API int tgl_state_load(const uint8_t *buf, int len);
 
 #endif

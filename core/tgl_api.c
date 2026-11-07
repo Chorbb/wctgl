@@ -21,7 +21,7 @@ static void on_frame_end(Nes *n) {
     else deferred = 1;
 }
 
-int tgl_api_version(void) { return 3; }
+int tgl_api_version(void) { return 4; }
 
 int tgl_load_rom(const uint8_t *rom, int size) {
     if (!rom || size <= 0 || size > ROM_MAX) return -10;
@@ -95,5 +95,70 @@ int tgl_patch_rom(int bank, int addr, const uint8_t *data, int len) {
     int base = (bank == banks - 1) ? 0xC000 : 0x8000;
     if (addr < base || addr + len > base + 0x4000) return -3;
     for (int i = 0; i < len; i++) nes.prg[bank * 0x4000 + (addr - base) + i] = data[i];
+    return 0;
+}
+
+/* ---------------------------------------------------------------- сохранения (версия 4)
+ * Снимок = заголовок + структура Nes целиком + кнопки API. Указатели (функции шины, ROM,
+ * перехваты, обработчики) при загрузке остаются текущими: они не часть состояния игры.
+ * Заголовок проверяет, что сборка ядра (размер состояния, число переведённых процедур)
+ * и ROM вместе с модами те же, — иначе отказ, а не испорченная игра. */
+typedef struct StateHeader {
+    char magic[4];           /* "TGLS" */
+    uint32_t version;        /* формат файла */
+    uint32_t nes_size;       /* sizeof(Nes) этой сборки */
+    uint32_t xlat;           /* число переведённых процедур этой сборки */
+    uint32_t rom_sum;        /* контрольная сумма PRG (ROM с модами) */
+    uint32_t extra;          /* кнопки: buttons_of_call | deferred << 8 */
+} StateHeader;
+
+static uint32_t prg_sum(void) {
+    uint32_t h = 2166136261u;                      /* FNV-1a */
+    int n = nes.prg_banks * 0x4000;
+    for (int i = 0; i < n; i++) { h ^= nes.prg[i]; h *= 16777619u; }
+    return h;
+}
+
+int tgl_state_size(void) { return (int)(sizeof(StateHeader) + sizeof(Nes)); }
+
+int tgl_state_save(uint8_t *buf, int cap) {
+    if (!loaded || !buf || cap < tgl_state_size()) return -1;
+    StateHeader h;
+    memcpy(h.magic, "TGLS", 4);
+    h.version = 1;
+    h.nes_size = (uint32_t)sizeof(Nes);
+    h.xlat = (uint32_t)xlat_count;
+    h.rom_sum = prg_sum();
+    h.extra = (uint32_t)buttons_of_call | ((uint32_t)deferred << 8);
+    memcpy(buf, &h, sizeof h);
+    memcpy(buf + sizeof h, &nes, sizeof nes);
+    return tgl_state_size();
+}
+
+int tgl_state_load(const uint8_t *buf, int len) {
+    if (!loaded || !buf || len != tgl_state_size()) return -1;
+    StateHeader h;
+    memcpy(&h, buf, sizeof h);
+    if (h.magic[0] != 'T' || h.magic[1] != 'G' || h.magic[2] != 'L' || h.magic[3] != 'S' || h.version != 1) return -2;  /* не сохранение */
+    if (h.nes_size != sizeof(Nes) || h.xlat != (uint32_t)xlat_count) return -3;  /* другая сборка ядра */
+    if (h.rom_sum != prg_sum()) return -4;                               /* другой ROM или моды */
+    /* сохранить то, что принадлежит этой программе, а не игре */
+    Cpu keep_cpu = nes.cpu;
+    uint8_t *prg = nes.prg;
+    struct NesHooks *hooks = nes.hooks;
+    void (*fe)(Nes *) = nes.frame_end_fn, (*tr)(Nes *) = nes.trace_fn, (*wf)(Nes *) = nes.watch_fn;
+    void *user = nes.user;
+    int use_hooks = nes.use_hooks;
+    double rate = nes.audio_rate;
+    memcpy(&nes, buf + sizeof h, sizeof nes);
+    nes.cpu.read = keep_cpu.read; nes.cpu.write = keep_cpu.write; nes.cpu.ctx = keep_cpu.ctx;
+    nes.prg = prg; nes.hooks = hooks;
+    nes.frame_end_fn = fe; nes.trace_fn = tr; nes.watch_fn = wf; nes.user = user;
+    nes.use_hooks = use_hooks;
+    nes.hook_depth = 0; nes.xlat_bail = 0; nes.xlat_unwind = 0;
+    if (nes.audio_rate != rate) { nes.audio_rate = rate; apu_set_rate(&nes.apu, rate); }
+    nes.apu.ring_r = nes.apu.ring_w;               /* старый звук из буфера не проигрывать */
+    buttons_of_call = (uint8_t)(h.extra & 0xFF);
+    deferred = (int)((h.extra >> 8) & 1);
     return 0;
 }
