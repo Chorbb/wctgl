@@ -1,7 +1,7 @@
 # Сборка и проверки ядра порта. Требуется gcc или clang.
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-array-bounds
-CORE = core/cpu6502.c core/nes.c core/rt.c
+CORE = core/cpu6502.c core/nes.c core/apu.c core/rt.c
 BUILD = build
 
 all: $(BUILD)/cpu_smoke $(BUILD)/replay $(BUILD)/boot $(BUILD)/api_test $(BUILD)/xtest_base
@@ -58,6 +58,7 @@ dll: | $(BUILD)
 	mkdir -p $(BUILD)/win
 	clang $(WINFLAGS) -c core/cpu6502.c -o $(BUILD)/win/cpu6502.o
 	clang $(WINFLAGS) -c core/nes.c -o $(BUILD)/win/nes.o
+	clang $(WINFLAGS) -c core/apu.c -o $(BUILD)/win/apu.o
 	clang $(WINFLAGS) -c core/tgl_api.c -o $(BUILD)/win/tgl_api.o
 	clang $(WINFLAGS) -c core/xlat.c -o $(BUILD)/win/xlat.o
 	clang $(WINFLAGS) -DXLAT_NOTRACE $(XLAT_CFLAGS) -c $(word 2,$(XLAT_SRC)) -o $(BUILD)/win/xlat_gen.o

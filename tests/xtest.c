@@ -293,6 +293,84 @@ int main(int argc, char **argv) {
         if (frames > rl.frames) frames = rl.frames;
     } else { fprintf(stderr, "cannot read snapshot file (%d)\n", e); return 2; }
 
+    if (!strcmp(mode, "wav")) {
+        /* звук: от снимка XT_SNAPS=a (по умолчанию 1) frames кадров в WAV 48 кГц моно */
+        if (!use_snaps) { fprintf(stderr, "wav: нужен snap.bin\n"); return 2; }
+        cur_snap = &sl.snaps[s_from < sl.nsnaps ? s_from : 0];
+        Nes *m = make_nes_into(NULL, rom, rom_size);
+        xlat_register_all(m); m->use_hooks = 1;
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/out.wav", "wb");
+        uint32_t ns = 0;
+        fwrite("RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\xbb\0\0\0\x77\x01\0\x02\0\x10\0data\0\0\0\0", 1, 44, o);
+        int16_t buf[4096];
+        for (int f = 0; f < frames; f++) {
+            nes_run_frame(m);
+            int k;
+            while ((k = apu_read(&m->apu, buf, 4096)) > 0) { fwrite(buf, 2, (size_t)k, o); ns += (uint32_t)k; }
+        }
+        uint32_t data = ns * 2, riff = 36 + data;
+        fseek(o, 4, SEEK_SET); fwrite(&riff, 4, 1, o);
+        fseek(o, 40, SEEK_SET); fwrite(&data, 4, 1, o);
+        fclose(o);
+        printf("wav: %u samples (%.1f s)\n", ns, ns / 48000.0);
+        return 0;
+    }
+
+    if (!strcmp(mode, "apu")) {
+        /* Звук против Mesen: от снимка k наш эмулятор идёт до момента снимка k+1, и состояние
+         * звуковых каналов сравнивается с тем, что записал Mesen. Ход игры к тому времени
+         * расходится, но музыка идёт по своей партитуре — совпадения много, где нет эффектов. */
+        if (!use_snaps) { fprintf(stderr, "apu: нужен snap.bin\n"); return 2; }
+        enum { F_P1PER, F_P1DUTY, F_P1VOL, F_P1LEN, F_P2PER, F_P2DUTY, F_P2VOL, F_P2LEN,
+               F_TPER, F_TLIN, F_TLEN, F_NPER, F_NVOL, F_NLEN, F_N };
+        static const char *names[F_N] = { "sq1 period", "sq1 duty", "sq1 volume", "sq1 length",
+            "sq2 period", "sq2 duty", "sq2 volume", "sq2 length", "tri period", "tri linear", "tri length",
+            "noise period", "noise volume", "noise length" };
+        long same[F_N] = {0}, total = 0;
+        Nes *m = NULL;
+        for (int si = s_from; si + 1 < s_to; si += s_step) {
+            const Snap *a = &sl.snaps[si], *b = &sl.snaps[si + 1];
+            cur_snap = a;
+            m = make_nes_into(m, rom, rom_size);
+            m->use_hooks = 0; m->trace_fn = NULL;
+            uint64_t need = b->frame - a->frame;
+            while (m->ppu.frames_done - frame_base < need) nes_step(m);
+            long guard = 0;
+            while (m->cpu.pc != 0xDC75 && guard++ < 200000) nes_step(m);
+            if (m->cpu.pc != 0xDC75) continue;
+            Apu *u = &m->apu;
+            long mv[F_N] = {
+                snap_get(b, "apu.square1.realPeriod", -1), snap_get(b, "apu.square1.duty", -1),
+                snap_get(b, "apu.square1.envelope.constantVolume", 0) ? snap_get(b, "apu.square1.envelope.volume", -1)
+                                                                      : snap_get(b, "apu.square1.envelope.counter", -1),
+                snap_get(b, "apu.square1.envelope.lengthCounter.counter", -1),
+                snap_get(b, "apu.square2.realPeriod", -1), snap_get(b, "apu.square2.duty", -1),
+                snap_get(b, "apu.square2.envelope.constantVolume", 0) ? snap_get(b, "apu.square2.envelope.volume", -1)
+                                                                      : snap_get(b, "apu.square2.envelope.counter", -1),
+                snap_get(b, "apu.square2.envelope.lengthCounter.counter", -1),
+                snap_get(b, "apu.triangle.timer.period", -1), snap_get(b, "apu.triangle.linearCounter", -1),
+                snap_get(b, "apu.triangle.lengthCounter.counter", -1),
+                snap_get(b, "apu.noise.timer.period", -2) + 1,
+                snap_get(b, "apu.noise.envelope.constantVolume", 0) ? snap_get(b, "apu.noise.envelope.volume", -1)
+                                                                    : snap_get(b, "apu.noise.envelope.counter", -1),
+                snap_get(b, "apu.noise.envelope.lengthCounter.counter", -1) };
+            long ov[F_N] = { u->p1.period, u->p1.duty, u->p1.env.constant ? u->p1.env.volume : u->p1.env.decay, u->p1.length,
+                             u->p2.period, u->p2.duty, u->p2.env.constant ? u->p2.env.volume : u->p2.env.decay, u->p2.length,
+                             u->tri.period, u->tri.linear, u->tri.length,
+                             u->noise.period, u->noise.env.constant ? u->noise.env.volume : u->noise.env.decay, u->noise.length };
+            for (int f = 0; f < F_N; f++) same[f] += mv[f] == ov[f];
+            total++;
+            if (getenv("XT_VERBOSE")) {
+                printf("снимок %d:", si + 1);
+                for (int f = 0; f < F_N; f++) if (mv[f] != ov[f]) printf("  %s %ld/%ld", names[f], ov[f], mv[f]);
+                printf("\n");
+            }
+        }
+        printf("apu: %ld snapshots compared (ours/Mesen)\n", total);
+        for (int f = 0; f < F_N; f++) printf("  %-13s %5.1f%% same\n", names[f], 100.0 * same[f] / (total ? total : 1));
+        return 0;
+    }
+
     int is_cov = !strcmp(mode, "coverage"), is_check = !strcmp(mode, "check");
     int is_prof = !strcmp(mode, "profile"), is_game = !strcmp(mode, "game");
     if (!is_cov && !is_check && !is_prof && !is_game) { fprintf(stderr, "unknown mode\n"); return 2; }

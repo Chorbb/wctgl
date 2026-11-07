@@ -5,7 +5,7 @@
 // вывод картинки 256x240 и чтение клавиатуры/геймпада.
 //
 // Управление:  стрелки/WASD — крестовина, Z — B (огонь), X — A (доп. оружие),
-//              Enter — Start, Shift — Select, F5 — Reset, Esc — выход.
+//              Enter — Start, Shift — Select, F5 — Reset, M — звук вкл/выкл, Esc — выход.
 // Геймпад:     крестовина/левый стик, нижняя кнопка — B, правая — A, Start, Back/Select.
 
 using Godot;
@@ -23,6 +23,8 @@ public partial class Main : Node2D
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_run_frame(int buttons);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_get_frame_rgba(byte[] rgba);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_frame_count();
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_audio_set_rate(double hz);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_audio_read(short[] buf, int max);
 
     // Где искать ROM по умолчанию. Если файла нет, откроется окно выбора, путь запомнится.
     const string DefaultRomPath = "C:/TGL_claude/rom/Guardian Legend, The (USA).nes";
@@ -41,6 +43,15 @@ public partial class Main : Node2D
     bool _running;
     double _acc;
 
+    // звук: ядро отдаёт моно 16 бит, Godot проигрывает через AudioStreamGenerator
+    AudioStreamPlayer _player;
+    AudioStreamGeneratorPlayback _playback;
+    readonly short[] _abuf = new short[8192];
+    Vector2[] _aframes = new Vector2[8192];
+    float _mixRate;
+    int _capacity;
+    bool _muted;
+
     public override void _Ready()
     {
         _screen = new Sprite2D { Centered = false };
@@ -57,7 +68,7 @@ public partial class Main : Node2D
         {
             SetupNativeLibrary();
             int ver = tgl_api_version();
-            if (ver != 1) { ShowMessage($"Неожиданная версия tglcore.dll: {ver}"); return; }
+            if (ver != 2) { ShowMessage($"Неожиданная версия tglcore.dll: {ver} (нужна 2). Обновите native/tglcore.dll."); return; }
         }
         catch (Exception e)
         {
@@ -65,6 +76,7 @@ public partial class Main : Node2D
             return;
         }
 
+        SetupAudio();
         string path = LoadSetting("rom_path", DefaultRomPath);
         if (!TryLoadRom(path)) AskForRom();
     }
@@ -132,6 +144,8 @@ public partial class Main : Node2D
         }
         if (_acc > NesFrameTime * 4) _acc = 0;
 
+        PumpAudio();
+
         if (frames > 0)
         {
             tgl_get_frame_rgba(_rgba);
@@ -142,7 +156,49 @@ public partial class Main : Node2D
 
     public override void _UnhandledInput(InputEvent e)
     {
-        if (e is InputEventKey k && k.Pressed && !k.Echo && k.Keycode == Key.F5 && _running) tgl_reset();
+        if (e is InputEventKey k && k.Pressed && !k.Echo)
+        {
+            if (k.Keycode == Key.F5 && _running) tgl_reset();
+            if (k.Keycode == Key.M) _muted = !_muted;
+        }
+    }
+
+    void SetupAudio()
+    {
+        _mixRate = AudioServer.GetMixRate();
+        var gen = new AudioStreamGenerator { MixRate = _mixRate, BufferLength = 0.15f };
+        _player = new AudioStreamPlayer { Stream = gen };
+        AddChild(_player);
+        _player.Play();
+        _playback = (AudioStreamGeneratorPlayback)_player.GetStreamPlayback();
+        _capacity = _playback.GetFramesAvailable();
+        tgl_audio_set_rate(_mixRate);
+    }
+
+    // Переложить звук из ядра в Godot. Часы звуковой карты и наши 60,1 кадра/с чуть расходятся,
+    // поэтому частота, с которой ядро выдаёт звук, подстраивается (до ±0,5 %) так, чтобы
+    // в буфере Godot всегда было ~60 мс: без щелчков от опустошения и без растущей задержки.
+    void PumpAudio()
+    {
+        if (_playback == null) return;
+        int n;
+        while ((n = tgl_audio_read(_abuf, _abuf.Length)) > 0)
+        {
+            int room = _playback.GetFramesAvailable();
+            if (n > room) n = room;                       // буфер полон — лишнее выбрасываем
+            if (n <= 0) continue;
+            if (_aframes.Length != n) _aframes = new Vector2[n];
+            for (int i = 0; i < n; i++)
+            {
+                float v = _muted ? 0f : _abuf[i] / 32768f;
+                _aframes[i] = new Vector2(v, v);
+            }
+            _playback.PushBuffer(_aframes);
+        }
+        int buffered = _capacity - _playback.GetFramesAvailable();
+        double target = 0.06 * _mixRate;
+        double err = Math.Clamp((target - buffered) / target, -1.0, 1.0);
+        tgl_audio_set_rate(_mixRate * (1.0 + 0.005 * err));
     }
 
     // Кнопки NES: A B Select Start Up Down Left Right = биты 0..7

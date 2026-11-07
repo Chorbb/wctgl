@@ -86,6 +86,58 @@ static long snap_get(const Snap *s, const char *key, long def) {
     return def;
 }
 
+/* Звуковые каналы из снимка Mesen (имена полей — как в emu.getState). */
+static void snap_env(const Snap *s, const char *pre, ApuEnv *e, int *length, int *enabled) {
+    char k[128];
+#define G(name, def) (snprintf(k, sizeof k, "%s.%s", pre, name), snap_get(s, k, def))
+    e->constant = (int)G("envelope.constantVolume", 0);
+    e->volume = (int)G("envelope.volume", 0);
+    e->decay = (int)G("envelope.counter", 0);
+    e->divider = (int)G("envelope.divider", 0);
+    e->start = (int)G("envelope.start", 0);
+    e->loop = (int)G("envelope.lengthCounter.halt", 0);
+    *length = (int)G("envelope.lengthCounter.counter", 0);
+    *enabled = (int)G("envelope.lengthCounter.enabled", 0);
+#undef G
+}
+
+static void snap_apu(const Snap *s, Apu *a) {
+    const char *names[2] = { "apu.square1", "apu.square2" };
+    ApuPulse *ps[2] = { &a->p1, &a->p2 };
+    char k[128];
+    for (int i = 0; i < 2; i++) {
+        ApuPulse *p = ps[i];
+#define G(name, def) (snprintf(k, sizeof k, "%s.%s", names[i], name), snap_get(s, k, def))
+        snap_env(s, names[i], &p->env, &p->length, &p->enabled);
+        p->duty = (int)G("duty", 0);
+        p->period = (int)G("realPeriod", 0);
+        p->timer = (int)G("timer.timer", 0) / 2;
+        p->sweep_on = (int)G("sweepEnabled", 0);
+        p->sweep_neg = (int)G("sweepNegate", 0);
+        p->sweep_period = (int)G("sweepPeriod", 1) - 1;
+        p->sweep_shift = (int)G("sweepShift", 0);
+        p->sweep_div = (int)G("sweepDivider", 0);
+        p->sweep_reload = (int)G("reloadSweep", 0);
+#undef G
+    }
+    a->tri.period = (int)snap_get(s, "apu.triangle.timer.period", 0);
+    a->tri.timer = (int)snap_get(s, "apu.triangle.timer.timer", 0);
+    a->tri.control = (int)snap_get(s, "apu.triangle.linearControlFlag", 0);
+    a->tri.linear = (int)snap_get(s, "apu.triangle.linearCounter", 0);
+    a->tri.linear_load = (int)snap_get(s, "apu.triangle.linearCounterReload", 0);
+    a->tri.linear_reload = (int)snap_get(s, "apu.triangle.linearReloadFlag", 0);
+    a->tri.step = (int)snap_get(s, "apu.triangle.sequencePosition", 0) & 31;
+    a->tri.length = (int)snap_get(s, "apu.triangle.lengthCounter.counter", 0);
+    a->tri.enabled = (int)snap_get(s, "apu.triangle.lengthCounter.enabled", 0);
+    snap_env(s, "apu.noise", &a->noise.env, &a->noise.length, &a->noise.enabled);
+    a->noise.mode = (int)snap_get(s, "apu.noise.modeFlag", 0);
+    a->noise.period = (int)snap_get(s, "apu.noise.timer.period", 3) + 1;
+    a->noise.timer = (int)snap_get(s, "apu.noise.timer.timer", 0);
+    a->noise.lfsr = (uint16_t)snap_get(s, "apu.noise.shiftRegister", 1);
+    a->five_step = (int)snap_get(s, "apu.frameCounter.stepMode", 0);
+    a->fc_cycle = (int)snap_get(s, "apu.frameCounter.previousCycle", 0);
+}
+
 /* Состояние приставки из снимка. ROM уже загружен в n (nes_load_rom). */
 static void snap_apply(Nes *n, const Snap *s) {
     nes_reset(n);
@@ -152,6 +204,8 @@ static void snap_apply(Nes *n, const Snap *s) {
     d->shift = (uint8_t)snap_get(s, "apu.dmc.shiftRegister", 0);
     d->silence = (int)snap_get(s, "apu.dmc.silenceFlag", 1);
     d->irq_flag = 0;
+    d->output = (int)snap_get(s, "apu.dmc.outputLevel", 0);
+    snap_apu(s, &n->apu);
 
     /* NMI уже принят (мы на входе в обработчик): линия поднята, нового фронта нет */
     c->nmi_level = (p->status & 0x80) && (p->ctrl & 0x80);

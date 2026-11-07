@@ -8,6 +8,7 @@
 static uint8_t rom_copy[ROM_MAX];
 static Nes nes;
 static int loaded;
+static double audio_rate = 48000.0;   /* частота вывода звука */
 /* Кнопки привязаны к номеру кадра: переданные в вызове k вступают в силу в такт конца
  * кадра k (одинаково с переводом и без него). Если переведённый код дошёл до конца кадра
  * раньше, чем пришли его кнопки, они применяются в начале следующего вызова — до этого
@@ -20,7 +21,7 @@ static void on_frame_end(Nes *n) {
     else deferred = 1;
 }
 
-int tgl_api_version(void) { return 1; }
+int tgl_api_version(void) { return 2; }
 
 int tgl_load_rom(const uint8_t *rom, int size) {
     if (!rom || size <= 0 || size > ROM_MAX) return -10;
@@ -31,6 +32,7 @@ int tgl_load_rom(const uint8_t *rom, int size) {
         nes.frame_end_fn = on_frame_end;
         xlat_register_all(&nes);    /* переведённые процедуры (если ядро собрано с ними) */
         nes.use_hooks = 1;
+        nes.audio_rate = audio_rate;
         nes_reset(&nes);
     }
     return err;
@@ -68,3 +70,16 @@ int tgl_peek(int addr) {
 void tgl_use_translation(int on) { nes.use_hooks = on ? 1 : 0; }
 
 int tgl_translated_routines(void) { return xlat_count; }
+
+
+void tgl_audio_set_rate(double hz) {
+    if (hz < 8000 || hz > 200000) return;
+    audio_rate = hz;
+    nes.audio_rate = hz;
+    apu_set_rate(&nes.apu, hz);
+}
+
+int tgl_audio_read(int16_t *out, int max) {
+    if (!loaded || max <= 0) return 0;
+    return apu_read(&nes.apu, out, max);
+}

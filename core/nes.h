@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include "cpu6502.h"
+#include "apu.h"
 
 #define NES_SCREEN_W 256
 #define NES_SCREEN_H 240
@@ -33,6 +34,7 @@ typedef struct Dmc {
     uint8_t buffer, shift;
     int bits_left;
     int silence;
+    int output;                 /* уровень на выходе (0..127) — только для звука */
     int dma_pending;            /* нужна подкачка байта (процессор остановится на ближайшем чтении) */
     int load_delay;             /* после записи в $4015 подкачка начинается через пару тактов */
     int dbg_fetches, dbg_irqs;  /* отладка: подкачки и прерывания за кадр */
@@ -64,6 +66,8 @@ struct Nes {
     Cpu cpu;
     Ppu ppu;
     Dmc dmc;
+    Apu apu;                 /* остальные звуковые каналы (на ход игры не влияют) */
+    double audio_rate;       /* частота вывода звука (0 = 48000) */
     uint8_t ram[2048];
     uint8_t *prg;            /* PRG-ROM целиком */
     int prg_banks;           /* количество банков по 16 КБ */

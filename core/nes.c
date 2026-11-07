@@ -132,6 +132,12 @@ static void dmc_clock(Nes *n) {
         if (d->buffer_full) { d->shift = d->buffer; d->buffer_full = 0; d->silence = 0; dmc_request(n); }
         else d->silence = 1;
     }
+    /* звук: очередной бит сдвигает уровень на ±2 (на тайминг подкачки не влияет) */
+    if (!d->silence) {
+        if (d->shift & 1) { if (d->output <= 125) d->output += 2; }
+        else if (d->output >= 2) d->output -= 2;
+    }
+    d->shift >>= 1;
     d->bits_left--;
 }
 
@@ -168,7 +174,7 @@ uint8_t nes_read(Nes *n, uint16_t a) {
         else { bit = n->pad_shift & 1; n->pad_shift = (uint8_t)((n->pad_shift >> 1) | 0x80); }
         return (uint8_t)(0x40 | bit);
     }
-    if (a == 0x4015) return (uint8_t)((n->dmc.irq_flag ? 0x80 : 0) | (n->dmc.bytes_left ? 0x10 : 0));
+    if (a == 0x4015) return (uint8_t)((n->dmc.irq_flag ? 0x80 : 0) | (n->dmc.bytes_left ? 0x10 : 0) | apu_status(&n->apu));
     if (a == 0x4017) return 0x40;
     if (a < 0x8000) return 0;
     if (a < 0xC000) return n->prg[n->bank * 0x4000 + (a - 0x8000)];
@@ -185,7 +191,10 @@ void nes_write(Nes *n, uint16_t a, uint8_t v) {
         return;
     }
     if (a >= 0x8000) { n->bank = v & (n->prg_banks - 1); return; }
+    if (a == 0x4011) { n->dmc.output = v & 0x7F; return; }
+    if (a == 0x4015) apu_write(&n->apu, a, v);
     if (a == 0x4010 || a == 0x4012 || a == 0x4013 || a == 0x4015) { dmc_write(n, a, v); return; }
+    if ((a >= 0x4000 && a <= 0x400F) || a == 0x4017) { apu_write(&n->apu, a, v); return; }
     /* остальной звук пока игнорируем */
 }
 
@@ -215,6 +224,7 @@ static void cycle_start(Nes *n, int is_read) {
     n->master += is_read ? 5 : 7;
     ppu_sync(n);
     dmc_clock(n);
+    apu_clock(&n->apu, n->dmc.output);
     n->cpu.irq_line = n->dmc.irq_flag;
     capture_frame_end(n);
 }
@@ -335,6 +345,7 @@ void nes_reset(Nes *n) {
     n->hit_delay = 2;
     n->oam_dma_pending = 0;
     memset(&n->dmc, 0, sizeof n->dmc);
+    apu_init(&n->apu, n->audio_rate > 0 ? n->audio_rate : 48000.0);
     n->dmc.period = DMC_RATES[0];
     n->dmc.timer = DMC_RATES[0];
     n->dmc.sample_addr = 0xC000;
