@@ -134,6 +134,48 @@ static uint16_t prev_pc; static uint8_t prev_y, prev_x; static int prev_bank;
 static void trace_stat(Nes *n) {
     uint16_t pc = n->cpu.pc;
     uint8_t op = nes_read(n, pc), lo = nes_read(n, (uint16_t)(pc + 1)), hi = nes_read(n, (uint16_t)(pc + 2));
+    if (getenv("XT_SCRIPT")) {
+        /* начало сценария волн: после $E75B указатель $66/$67 и банк $7F заданы */
+        if (pc == 0xE75D)
+            fprintf(stat_out, "P %04X %d %d %d %d\n", n->ram[0x66] | (n->ram[0x67] << 8), n->ram[0x7F],
+                    n->ram[0x50], n->ram[0x52], n->ram[0x53]);
+        return;
+    }
+    if (getenv("XT_SPAWN2")) {
+        /* любое появление: ячейка $500+k стала ненулевой — виновата предыдущая инструкция */
+        static uint8_t last[24];
+        for (int k = 0; k < 24; k++) {
+            uint8_t v = n->ram[0x500 + k];
+            if (v && !last[k]) {
+                fprintf(stat_out, "N %04X %d %02X %d %d %d\n", prev_pc, prev_bank, v, k, n->ram[0x50],
+                        n->ram[0x52] | (n->ram[0x53] << 8));
+            }
+            last[k] = v;
+        }
+        prev_pc = pc; prev_y = n->cpu.y; prev_x = n->cpu.x;
+        prev_bank = pc >= 0xC000 ? 7 : (n->bank & 7);
+        return;
+    }
+    if (getenv("XT_SPAWN")) {
+        /* появление объектов: запись ненулевого типа в $500,X (STA abs,X / abs,Y) */
+        if ((op == 0x9D || op == 0x99) && hi == 0x05 && lo == 0x00 && n->cpu.a) {
+            uint8_t pop = nes_read(n, prev_pc);
+            uint16_t src = (uint16_t)(nes_read(n, (uint16_t)(prev_pc + 1)) | (nes_read(n, (uint16_t)(prev_pc + 2)) << 8));
+            int idx = -1;
+            if (pop == 0xB9) idx = prev_y; else if (pop == 0xBD) idx = prev_x;
+            else if (pop == 0xB1) {                        /* LDA (zp),Y: адрес = указатель + Y */
+                uint8_t z = nes_read(n, (uint16_t)(prev_pc + 1));
+                src = (uint16_t)(n->ram[z] | (n->ram[(uint8_t)(z + 1)] << 8)); idx = prev_y;
+            } else if (pop == 0xA9) { src = 0xFFFF; idx = nes_read(n, (uint16_t)(prev_pc + 1)); }
+            else src = 0;
+            int bank = pc >= 0xC000 ? 7 : (n->bank & 7);
+            fprintf(stat_out, "S %04X %d %02X %02X %04X %d %d %d %d\n", pc, bank, n->cpu.a, pop, src, idx,
+                    prev_bank, n->ram[0x50], n->ram[0x52] | (n->ram[0x53] << 8));
+        }
+        prev_pc = pc; prev_y = n->cpu.y; prev_x = n->cpu.x;
+        prev_bank = pc >= 0xC000 ? 7 : (n->bank & 7);
+        return;
+    }
     if (op == 0x9D && hi == 0x05 && (lo == 0x90 || lo == 0xA8)) {
         uint8_t pop = nes_read(n, prev_pc);
         uint16_t src = (uint16_t)(nes_read(n, (uint16_t)(prev_pc + 1)) | (nes_read(n, (uint16_t)(prev_pc + 2)) << 8));
