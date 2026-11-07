@@ -139,6 +139,12 @@ static void trace_stat(Nes *n) {
         if (pc == 0xE75D)
             fprintf(stat_out, "P %04X %d %d %d %d\n", n->ram[0x66] | (n->ram[0x67] << 8), n->ram[0x7F],
                     n->ram[0x50], n->ram[0x52], n->ram[0x53]);
+        if (pc == 0xA48A && (n->bank & 7) == 5)     /* сценарий комнаты лабиринта: таблица $A4C5 по $57 */
+            fprintf(stat_out, "P %04X %d %d %d %d\n", n->ram[0x66] | (n->ram[0x67] << 8), 5,
+                    n->ram[0x50], n->ram[0x52], n->ram[0x53]);
+        if (pc == 0xF828) fprintf(stat_out, "E %d\n", n->cpu.a);                       /* враг появился */
+        if (pc == 0xF840) fprintf(stat_out, "G %d\n", n->ram[0x548 + n->cpu.x]);       /* генератор */
+        if (pc == 0xF7FC) fprintf(stat_out, "F %d\n", n->ram[0x16]);                   /* не нашлось места */
         return;
     }
     if (getenv("XT_SPAWN2")) {
@@ -393,6 +399,7 @@ int main(int argc, char **argv) {
             cur_snap = &sl.snaps[si];
             m = make_nes_into(m, rom, rom_size);
             m->use_hooks = 0; m->trace_fn = trace_stat; stat_out = o;
+            fprintf(o, "R %d\n", si);                 /* начало отрезка: прежний сценарий не продолжается */
             int segf = frames;
             if (cur_snap->frame + 1 + (uint32_t)segf > sl.frames) segf = (int)(sl.frames - cur_snap->frame - 1);
             for (int f = 0; f < segf; f++) nes_run_frame(m);
