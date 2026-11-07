@@ -203,6 +203,9 @@ static void check_wrapper(Nes *n) {
     uint8_t s_ret = (uint8_t)(n->cpu.s + (x->kind == 1 ? 3 : x->kind == 0 ? 2 : 0));
     if (checking) {                 /* вложенный вызов внутри проверки: просто перевод */
         x->fn(n);
+        /* свёртка по времени — дело внешнего уровня: не сбрасывать её здесь, иначе
+         * внешний цикл ожидания никогда не свернётся */
+        if (n->xlat_unwind) return;
         complete(n, s_ret, x);
         return;
     }
