@@ -71,6 +71,54 @@ def entry(p, corridor, boss_alive=False):
     return c, {'?': c}, 0, None
 
 
+def brush_rows(ptr, width, rows, max_rows=12):
+    """рисунок кисти по коду $E906-$E92C: 0 n — сдвиг на n столбцов, 1 — конец ряда, иначе клетка.
+    Возвращает ряды: списки (смещение столбца, значение клетки)."""
+    out, y = [], 0
+    for _ in range(min(rows if rows else max_rows, max_rows)):
+        x, w, row = 0, width, []
+        while True:
+            b = rd(ptr + y)
+            if b == 0:
+                x += rd(ptr + y + 1) - 256 if rd(ptr + y + 1) > 127 else rd(ptr + y + 1); y += 2; continue
+            y += 1
+            if b == 1: break
+            row.append((x, b)); x += 1; w -= 1
+            if w <= 0: break
+        out.append(row)
+    return out
+
+
+def brush_text(o):
+    """описание кисти и её рисунок клетками"""
+    col = o.get('$400', 0); col = col - 256 if col > 127 else col
+    dx = o.get('$438', 0); dx = dx - 256 if dx > 127 else dx
+    width = o.get('$420', o['данные'][0] if 'данные' in o else None)
+    rows = o.get('$418', o['данные'][1] if 'данные' in o else None)
+    parts = ['кисть %d: столбец %d' % (o['слот'], col)]
+    if dx: parts.append('сдвиг %+d за ряд' % dx)
+    if '$430' in o and o['$430']: parts.append('задержка %d рядов' % o['$430'])
+    if '$410' in o: parts.append('повторов %s' % (o['$410'] if o['$410'] else '∞'))
+    if 'указатель' in o:
+        q = int(o['указатель'][1:], 16)
+        width, rows = rd(q), rd(q + 1)
+        parts.append('клеток в ряду %d, высота %d рядов, рисунок $%04X' % (width, rows, q + 2))
+        grid = brush_rows(q + 2, width, rows)
+    elif 'данные' in o:
+        d = o['данные']
+        parts.append('клеток в ряду %d, высота %d рядов, рисунок $%04X' % (d[0], d[1], d[2] | d[3] << 8))
+        grid = brush_rows(d[2] | d[3] << 8, d[0], d[1])
+    else:
+        grid = []
+    lines = []
+    if grid:
+        lo = min([c for r in grid for c, _ in r] + [0]); hi = max([c for r in grid for c, _ in r] + [0])
+        for r in reversed(grid):            # экран едет вверх: первый ряд рисунка — внизу
+            cells = dict(r)
+            lines.append(' '.join('%02X' % cells[c] if c in cells else '..' for c in range(lo, hi + 1)))
+    return ', '.join(parts), lines
+
+
 def walk(start, corridor, limit=300):
     """события потока по порядку (без ветвлений по «повтору»): [(позиция, адрес, команда, параметры)]"""
     pos, p, out, seen = w16(start), start + 2, [], set()
@@ -124,11 +172,22 @@ if '--check' in sys.argv:
     sys.exit(0)
 
 print('# Коридоры: поток данных уровня\n')
-print('Банк 4. Позиция — пройденный путь прокрутки (+1 за 16 точек). Расшифровано по коду; сверено с записью.\n')
+print('Банк 4. Позиция — пройденный путь прокрутки (+1 за 16 точек, один ряд клеток). Расшифровано по коду;')
+print('порядок команд сверен с записью (64 потока, 778 команд, 0 расхождений).\n')
+print('Экран коридора — ряды по 16 клеток ($4C0-$4CF). Основа ряда — узор фона (команда «фон»),')
+print('поверх рисуют до 8 кистей (команда «объекты»): у каждой столбец, сдвиг за ряд, сколько клеток')
+print('в ряду, высота рисунка в рядах, число повторов (∞ — пока не заменят), рисунок. В рисунке —')
+print('номера клеток (две цифры), «..» — пусто; верх рисунка — как на экране (первый ряд внизу).\n')
 for st, corr in sorted(starts.items(), key=lambda t: t[1]):
     print('## Коридор %d — поток $%04X\n' % (corr, st))
-    print('| позиция | адрес | команда | параметры |')
-    print('|---|---|---|---|')
     for pos, p, c, prm in walk(st, corr):
-        print('| %d | $%04X | %s | %s |' % (pos, p, NAMES[c] if c < 10 else '?', ', '.join('%s: %s' % kv for kv in prm.items())))
+        if c == 6:
+            print('- **%d** — объекты (кисти рисунка уровня):' % pos)
+            for o in prm['объекты']:
+                txt, grid = brush_text(o)
+                print('  - %s' % txt)
+                if grid:
+                    print('    ```'); [print('    ' + g) for g in grid]; print('    ```')
+        else:
+            print('- **%d** — %s %s' % (pos, NAMES[c] if c < 10 else '?', ', '.join('%s %s' % kv for kv in prm.items())))
     print()
