@@ -15,25 +15,45 @@
 #include "../core/nes.h"
 #include "../core/xlat.h"
 #include "reclog.h"
+#include "snaplog.h"
 
+/* Источник: запись tgl_logger3/4 (одна последовательность от перезагрузки) или
+ * tgl_logger5 (много отрезков, каждый — от своего снимка). */
 static RecLog rl;
+static SnapLog sl;
+static int use_snaps;
+static const Snap *cur_snap;
+static const uint8_t *inp; static uint64_t inp_len, inp_start;
 static uint64_t frame_base;
 
 static void apply_input(Nes *n) {
-    uint64_t k = n->ppu.frames_done - frame_base;
-    n->pad_state = k < (uint64_t)rl.frames ? rl.input[k] : 0;
+    uint64_t k = inp_start + (n->ppu.frames_done - frame_base);
+    n->pad_state = k < inp_len ? inp[k] : 0;
 }
 
-static Nes *make_nes(const uint8_t *rom, long size) {
-    Nes *n = calloc(1, sizeof(Nes));
-    if (nes_load_rom(n, rom, (int)size)) { fprintf(stderr, "rom load error\n"); exit(2); }
-    memcpy(n->ram, rl.ram0, 2048);
-    nes_reset(n);
+/* Приставка в начале текущего отрезка. Объект переиспользуется между отрезками
+ * (таблица перехватов большая), поэтому ROM грузится один раз. */
+static Nes *make_nes_into(Nes *n, const uint8_t *rom, long size) {
+    if (!n) {
+        n = calloc(1, sizeof(Nes));
+        if (nes_load_rom(n, rom, (int)size)) { fprintf(stderr, "rom load error\n"); exit(2); }
+    }
+    if (cur_snap) {
+        snap_apply(n, cur_snap);
+        inp = sl.input; inp_len = sl.frames + 1; inp_start = cur_snap->frame + 1;
+    } else {
+        memcpy(n->ram, rl.ram0, 2048);
+        nes_reset(n);
+        inp = rl.input; inp_len = (uint64_t)rl.frames; inp_start = 0;
+    }
+    n->frame = n->ppu.frames_done;
+    n->hook_depth = 0; n->xlat_bail = 0; n->xlat_unwind = 0;
     frame_base = n->ppu.frames_done;
     n->frame_end_fn = apply_input;
     apply_input(n);
     return n;
 }
+static Nes *make_nes(const uint8_t *rom, long size) { return make_nes_into(NULL, rom, size); }
 
 /* ---------------------------------------------------------------- сравнение состояний */
 
@@ -232,23 +252,101 @@ static void trace_count(Nes *n) { (void)n; emu_instr++; }
 
 int main(int argc, char **argv) {
     if (argc < 5) {
-        fprintf(stderr, "usage: xtest coverage|check|game rom.nes run.bin frames [out.txt]\n");
+        fprintf(stderr, "usage: xtest coverage|check|game|profile rom.nes run.bin|snap.bin frames [out.txt]\n"
+                        "  snap.bin: каждый снимок — отдельный отрезок длиной frames кадров;\n"
+                        "  XT_SNAPS=a:b — только снимки с a по b-1, XT_SNAP_STEP=k — каждый k-й\n");
         return 2;
     }
     const char *mode = argv[1];
     long rom_size;
     uint8_t *rom = rl_read_file(argv[2], &rom_size);
     if (!rom) { fprintf(stderr, "cannot read rom\n"); return 2; }
-    if (reclog_load(&rl, argv[3])) { fprintf(stderr, "cannot read recording\n"); return 2; }
     int frames = atoi(argv[4]);
-    if (frames > rl.frames) frames = rl.frames;
+    int s_from = 0, s_to = 1, s_step = 1;
+    int e = snaplog_load(&sl, argv[3]);
+    if (e == 0) {
+        use_snaps = 1;
+        s_to = sl.nsnaps;
+        const char *r = getenv("XT_SNAPS");
+        if (r) { sscanf(r, "%d:%d", &s_from, &s_to); if (s_to > sl.nsnaps) s_to = sl.nsnaps; }
+        if (getenv("XT_SNAP_STEP")) s_step = atoi(getenv("XT_SNAP_STEP"));
+    } else if (e == -2) {
+        if (reclog_load(&rl, argv[3])) { fprintf(stderr, "cannot read recording\n"); return 2; }
+        if (frames > rl.frames) frames = rl.frames;
+    } else { fprintf(stderr, "cannot read snapshot file (%d)\n", e); return 2; }
 
-    if (!strcmp(mode, "coverage")) {
-        cov = calloc(8, 0x10000);
-        rts_tgt = calloc(8, 0x10000);
-        Nes *n = make_nes(rom, rom_size);
-        n->trace_fn = trace_cov;
-        for (int f = 0; f < frames; f++) nes_run_frame(n);
+    int is_cov = !strcmp(mode, "coverage"), is_check = !strcmp(mode, "check");
+    int is_prof = !strcmp(mode, "profile"), is_game = !strcmp(mode, "game");
+    if (!is_cov && !is_check && !is_prof && !is_game) { fprintf(stderr, "unknown mode\n"); return 2; }
+    if (is_cov) { cov = calloc(8, 0x10000); rts_tgt = calloc(8, 0x10000); }
+    if (is_prof) cov = calloc(8 * 0x10000, sizeof(uint32_t));
+
+    Nes *n = NULL, *ref = NULL;
+    long total_frames = 0, bad = 0, segs = 0;
+    uint64_t ref_steps = 0, port_steps = 0, unw = 0;
+    for (int si = s_from; si < s_to; si += s_step) {
+        cur_snap = use_snaps ? &sl.snaps[si] : NULL;
+        int seg_frames = frames;
+        if (use_snaps && cur_snap->frame + 1 + (uint32_t)seg_frames > sl.frames) seg_frames = (int)(sl.frames - cur_snap->frame - 1);
+        if (seg_frames <= 0) continue;
+        segs++;
+        n = make_nes_into(n, rom, rom_size);
+        if (is_cov) {
+            n->use_hooks = 0; n->trace_fn = trace_cov;
+            for (int f = 0; f < seg_frames; f++) nes_run_frame(n);
+            if (getenv("XT_PPM")) {      /* картинка конца отрезка — проверить, что игра из снимка идёт как надо */
+                char path[512]; snprintf(path, sizeof path, "%s/seg%03d.ppm", getenv("XT_PPM"), si);
+                FILE *o = fopen(path, "wb");
+                fprintf(o, "P6 256 240 255\n");
+                for (int i = 0; i < 256 * 240; i++) {
+                    uint32_t c = NES_PALETTE[n->shown[i] & 63];
+                    fputc((c >> 16) & 255, o); fputc((c >> 8) & 255, o); fputc(c & 255, o);
+                }
+                fclose(o);
+            }
+        } else if (is_check) {
+            for (int i = 0; i < xlat_count; i++)
+                nes_set_hook(n, xlat_table[i].bank < 0 ? 7 : xlat_table[i].bank, xlat_table[i].entry, check_wrapper);
+            n->use_hooks = 1;
+            long before = check_fail;
+            for (int f = 0; f < seg_frames; f++) nes_run_frame(n);
+            if (check_fail != before && use_snaps) printf("  ^ отрезок от снимка %d (кадр записи %u)\n", si, cur_snap->frame);
+        } else if (is_prof) {
+            xlat_register_all(n); n->use_hooks = 1; n->trace_fn = trace_prof;
+            for (int f = 0; f < seg_frames; f++) nes_run_frame(n);
+        } else {
+            /* game: эталон (только эмулятор) и порт рядом */
+            Nes *port = n;
+            ref = make_nes_into(ref, rom, rom_size);
+            ref->use_hooks = 0;
+            xlat_register_all(port);
+            port->use_hooks = 1;
+            uint64_t r0 = ref->emu_steps, p0 = port->emu_steps, u0 = port->unwinds;
+            int seg_bad = 0;
+            for (int f = 0; f < seg_frames; f++) {
+                nes_run_frame(port);
+                /* порт останавливается на границе своей (возможно, переведённой) процедуры — это
+                 * граница инструкции и для оригинала: доводим эталон до того же такта и сравниваем всё */
+                while (ref->cpu.cycles < port->cpu.cycles && !ref->cpu.jammed) nes_step(ref);
+                char why[256];
+                if (ref->cpu.cycles != port->cpu.cycles) snprintf(why, sizeof why, "эталон не попал в такт порта");
+                if (ref->cpu.cycles != port->cpu.cycles || diff_state(port, ref, why, sizeof why)) {
+                    if (use_snaps) printf("снимок %d (кадр записи %u) + кадр %d: расхождение порт/оригинал — %s\n",
+                                          si, cur_snap->frame, f, why);
+                    else printf("кадр %d: расхождение порт/оригинал — %s\n", f, why);
+                    seg_bad++;
+                    break;     /* дальше этот отрезок сравнивать бессмысленно */
+                }
+            }
+            bad += seg_bad;
+            ref_steps += ref->emu_steps - r0; port_steps += port->emu_steps - p0; unw += port->unwinds - u0;
+            if (bad >= 10) break;
+        }
+        total_frames += seg_frames;
+        if (n->cpu.jammed) printf("  ! отрезок %d: процессор встал на недопустимой инструкции ($%04X)\n", si, n->cpu.pc);
+    }
+
+    if (is_cov) {
         FILE *o = fopen(argc > 5 ? argv[5] : "build/coverage.txt", "w");
         long cnt = 0;
         for (int b = 0; b < 8; b++)
@@ -258,31 +356,18 @@ int main(int argc, char **argv) {
             for (int a = 0x8000; a < 0x10000; a++)
                 if (rts_tgt[b * 0x10000 + a]) fprintf(o, "T %d %04X\n", b, a);
         fclose(o);
-        printf("coverage: %ld instructions over %d frames\n", cnt, frames);
+        printf("coverage: %ld instructions over %ld frames (%ld segments)\n", cnt, total_frames, segs);
         return 0;
     }
-
-    if (!strcmp(mode, "check")) {
-        Nes *n = make_nes(rom, rom_size);
-        for (int i = 0; i < xlat_count; i++)
-            nes_set_hook(n, xlat_table[i].bank < 0 ? 7 : xlat_table[i].bank, xlat_table[i].entry, check_wrapper);
-        n->use_hooks = 1;
-        for (int f = 0; f < frames; f++) nes_run_frame(n);
-        printf("check: %ld calls, %ld mismatches, %ld spanned a frame end\n", checks, check_fail, spans);
-        for (int i = 0; i < xlat_count; i++)
-            printf("  %-14s %8ld calls %6ld bad\n", xlat_table[i].name, per_fn_calls[i], per_fn_fail[i]);
+    if (is_check) {
+        printf("check: %ld frames in %ld segments, %ld calls, %ld mismatches, %ld spanned a frame end\n",
+               total_frames, segs, checks, check_fail, spans);
+        if (getenv("XT_VERBOSE"))
+            for (int i = 0; i < xlat_count; i++)
+                printf("  %-14s %8ld calls %6ld bad\n", xlat_table[i].name, per_fn_calls[i], per_fn_fail[i]);
         return check_fail ? 1 : 0;
     }
-
-    if (!strcmp(mode, "profile")) {
-        /* где эмулятор тратит инструкции при включённом переводе: кандидаты на перевод.
-         * Каждая инструкция приписывается процедуре — последнему JSR-входу в стеке вызовов. */
-        cov = calloc(8 * 0x10000, sizeof(uint32_t));
-        Nes *n = make_nes(rom, rom_size);
-        xlat_register_all(n);
-        n->use_hooks = 1;
-        n->trace_fn = trace_prof;
-        for (int f = 0; f < frames; f++) nes_run_frame(n);
+    if (is_prof) {
         uint32_t *c = (uint32_t *)cov;
         FILE *o = fopen(argc > 5 ? argv[5] : "build/profile.txt", "w");
         for (int b = 0; b < 8; b++)
@@ -292,43 +377,11 @@ int main(int argc, char **argv) {
         printf("profile: emulated %llu instructions\n", (unsigned long long)n->emu_steps);
         return 0;
     }
-
-    if (!strcmp(mode, "game")) {
-        Nes *ref = make_nes(rom, rom_size);
-        Nes *port = make_nes(rom, rom_size);
-        xlat_register_all(port);
-        port->use_hooks = 1;
-        uint64_t ref_instr = 0;
-        int bad = 0;
-        for (int f = 0; f < frames; f++) {
-            nes_run_frame(port);
-            /* порт останавливается на границе своей (возможно, переведённой) процедуры — это
-             * граница инструкции и для оригинала: доводим эталон до того же такта и сравниваем всё */
-            while (ref->cpu.cycles < port->cpu.cycles && !ref->cpu.jammed) nes_step(ref);
-            char why[256];
-            if (ref->cpu.cycles != port->cpu.cycles) snprintf(why, sizeof why, "эталон не попал в такт порта");
-            if (ref->cpu.cycles != port->cpu.cycles || diff_state(port, ref, why, sizeof why)) {
-                printf("кадр %d: расхождение порт/оригинал — %s\n", f, why);
-                if (++bad >= 5) break;
-            }
-        }
-        (void)ref_instr; (void)emu_bytes_exec;
-        if (getenv("XT_UNWIND")) {
-            /* повторить и показать, какие перехваты сворачивались */
-            static uint32_t hist[0x10000];
-            Nes *q = make_nes(rom, rom_size);
-            xlat_register_all(q); q->use_hooks = 1;
-            uint64_t u = 0;
-            for (int f = 0; f < frames; f++) { nes_run_frame(q); if (q->unwinds != u) { hist[q->hook_pc0]++; u = q->unwinds; } }
-            for (int a = 0; a < 0x10000; a++) if (hist[a]) printf("  unwind at hook $%04X: %u\n", a, hist[a]);
-        }
-        long tb = 0;
-        for (int i = 0; i < xlat_count; i++) tb += xlat_table[i].bytes;
-        printf("game: %d frames, %d bad; translated routines %d (%ld bytes); "
-               "instructions run by translated code: %.1f%%; unwinds %llu\n", frames, bad, xlat_count, tb,
-               100.0 * (1.0 - (double)port->emu_steps / (double)ref->emu_steps), (unsigned long long)port->unwinds);
-        return bad ? 1 : 0;
-    }
-    fprintf(stderr, "unknown mode\n");
-    return 2;
+    long tb = 0;
+    for (int i = 0; i < xlat_count; i++) tb += xlat_table[i].bytes;
+    (void)emu_bytes_exec; (void)trace_count;
+    printf("game: %ld frames in %ld segments, %ld bad; translated routines %d (%ld bytes); "
+           "instructions run by translated code: %.1f%%; unwinds %llu\n", total_frames, segs, bad, xlat_count, tb,
+           100.0 * (1.0 - (double)port_steps / (double)(ref_steps ? ref_steps : 1)), (unsigned long long)unw);
+    return bad ? 1 : 0;
 }

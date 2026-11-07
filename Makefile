@@ -33,10 +33,13 @@ $(BUILD)/xtest_base: tests/xtest.c tests/reclog.h core/xlat.c core/xlat_none.c $
 	$(CC) $(CFLAGS) -o $@ tests/xtest.c core/xlat.c core/xlat_none.c $(CORE)
 
 # покрытие: обе записи, объединённо
+# покрытие: старые записи от перезагрузки + отрезки от каждого снимка tgl_logger5 (recordings/l5/snap_*.bin)
+SNAPS ?= $(wildcard recordings/l5/snap_*.bin)
 coverage: $(BUILD)/xtest_base
 	$(BUILD)/xtest_base coverage $(ROM) recordings/run1.bin 100000 $(BUILD)/cov1.txt
 	$(BUILD)/xtest_base coverage $(ROM) recordings/run2.bin 100000 $(BUILD)/cov2.txt
-	sort -u $(BUILD)/cov1.txt $(BUILD)/cov2.txt > $(BUILD)/coverage.txt
+	for s in $(SNAPS); do $(BUILD)/xtest_base coverage $(ROM) $$s 1200 $(BUILD)/cov_$$(basename $$s .bin).txt; done
+	sort -u $(BUILD)/cov1.txt $(BUILD)/cov2.txt $(foreach s,$(SNAPS),$(BUILD)/cov_$(basename $(notdir $(s))).txt) > $(BUILD)/coverage.txt
 
 gen:
 	mkdir -p $(BUILD)/gen
