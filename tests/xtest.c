@@ -293,6 +293,32 @@ int main(int argc, char **argv) {
         if (frames > rl.frames) frames = rl.frames;
     } else { fprintf(stderr, "cannot read snapshot file (%d)\n", e); return 2; }
 
+    if (!strcmp(mode, "dump")) {
+        /* для разметки памяти: каждые XT_EVERY кадров — память в конце кадра, экраны (2 КБ),
+         * спрайты (256 Б) и кнопки. Запись: "D" | отрезок(2) | кадр(2) | кнопки(1) | RAM | NT | OAM */
+        if (!use_snaps) { fprintf(stderr, "dump: нужен snap.bin\n"); return 2; }
+        int every = getenv("XT_EVERY") ? atoi(getenv("XT_EVERY")) : 4;
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/dump.bin", "wb");
+        Nes *m = NULL; long recs = 0;
+        for (int si = s_from; si < s_to; si += s_step) {
+            cur_snap = &sl.snaps[si];
+            m = make_nes_into(m, rom, rom_size);
+            xlat_register_all(m); m->use_hooks = 1;
+            int segf = frames;
+            if (cur_snap->frame + 1 + (uint32_t)segf > sl.frames) segf = (int)(sl.frames - cur_snap->frame - 1);
+            for (int f = 0; f < segf; f++) {
+                nes_run_frame(m);
+                if (f % every) continue;
+                uint8_t h[6] = { 'D', (uint8_t)si, (uint8_t)(si >> 8), (uint8_t)f, (uint8_t)(f >> 8), m->pad_state };
+                fwrite(h, 1, 6, o); fwrite(m->fe_ram, 1, 2048, o); fwrite(m->ppu.nt, 1, 2048, o); fwrite(m->ppu.oam, 1, 256, o);
+                recs++;
+            }
+        }
+        fclose(o);
+        printf("dump: %ld records\n", recs);
+        return 0;
+    }
+
     if (!strcmp(mode, "wav")) {
         /* звук: от снимка XT_SNAPS=a (по умолчанию 1) frames кадров в WAV 48 кГц моно */
         if (!use_snaps) { fprintf(stderr, "wav: нужен snap.bin\n"); return 2; }

@@ -17,6 +17,21 @@ import sys
 
 sys.path.insert(0, __file__.rsplit('/', 1)[0])
 from disasm import Rom, OPS, SIZE  # noqa: E402
+import os  # noqa: E402
+import symbols as symtab  # noqa: E402
+
+SYM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'symbols', 'tgl.sym')
+SYM_RAM, SYM_CODE = symtab.load(SYM_PATH) if os.path.exists(SYM_PATH) else ([], {})
+
+
+def operand_note(mn, mode, v):
+    """имя переменной для комментария: 'life', 'obj_x,X'"""
+    if mode in ('zp', 'abs', 'zpx', 'zpy', 'absx', 'absy', 'indx', 'indy'):
+        nm = symtab.ram_name(SYM_RAM, v)
+        if nm:
+            suf = {'zpx': ',X', 'absx': ',X', 'zpy': ',Y', 'absy': ',Y', 'indx': ' (,X)', 'indy': ' (),Y'}.get(mode, '')
+            return ' ' + nm + suf
+    return ''
 
 READ_OPS = {'LDA', 'LDX', 'LDY', 'ADC', 'SBC', 'AND', 'ORA', 'EOR', 'CMP', 'CPX', 'CPY', 'BIT'}
 WRITE_OPS = {'STA', 'STX', 'STY'}
@@ -394,8 +409,9 @@ class Gen:
             code = self.instr(bank, pc, d, name, body)
             pure_bail = d[0] == 'JSR' and d[3] in self.nonproc
             # инструкцию, которую сразу отдаём эмулятору, трассирует он сам
-            lines.append(('L_%04X: /* %s %s */' if pure_bail else 'L_%04X: XT(0x%04X); /* %s %s */')
-                         % ((pc, d[0], d[1]) if pure_bail else (pc, pc, d[0], d[1])))
+            note = operand_note(d[0], d[1], d[3])
+            lines.append(('L_%04X: /* %s %s%s */' if pure_bail else 'L_%04X: XT(0x%04X); /* %s %s%s */')
+                         % ((pc, d[0], d[1], note) if pure_bail else (pc, pc, d[0], d[1], note)))
             for c in code:
                 lines.append('    ' + c)
         if body:
@@ -462,6 +478,9 @@ def main():
             continue
         if not g.covered(bank, entry):
             continue
+        sym = SYM_CODE.get((key[0] if 0x8000 <= entry < 0xC000 else 7, entry))
+        if not name and sym and sym['kind'] == 'code':
+            name = sym['name'] + ('_b%d' % key[0] if 0x8000 <= entry < 0xC000 else '')
         name = name or ('x_%s_%04X' % ('b%d' % key[0] if 0x8000 <= entry < 0xC000 else 'fix', entry))
         if not g.is_procedure(key[0], entry, kind):
             g.nonproc.add(entry)
