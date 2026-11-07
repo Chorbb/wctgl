@@ -23,10 +23,21 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from disasm import Rom
 
-rom = Rom(sys.argv[1])
+rom = None
 B = 4
-rd = lambda a: rom.byte(B, a & 0xFFFF)
-w16 = lambda a: rd(a) | rd(a + 1) << 8
+
+
+def init(path):
+    global rom
+    rom = Rom(path)
+
+
+def rd(a):
+    return rom.byte(B, a & 0xFFFF)
+
+
+def w16(a):
+    return rd(a) | rd(a + 1) << 8
 NAMES = ['скорость', 'фон', 'волны', 'переход', 'загрузка', 'босс', 'объекты', 'группа', 'параметры', 'повтор']
 
 
@@ -96,7 +107,7 @@ def brush_text(o):
     width = o.get('$420', o['данные'][0] if 'данные' in o else None)
     rows = o.get('$418', o['данные'][1] if 'данные' in o else None)
     parts = ['кисть %d: столбец %d' % (o['слот'], col)]
-    if dx: parts.append('сдвиг %+d за ряд' % dx)
+    if dx: parts.append('сдвиг %+d столбцов за повтор' % dx)
     if '$430' in o and o['$430']: parts.append('задержка %d рядов' % o['$430'])
     if '$410' in o: parts.append('повторов %s' % (o['$410'] if o['$410'] else '∞'))
     if 'указатель' in o:
@@ -105,9 +116,9 @@ def brush_text(o):
         parts.append('клеток в ряду %d, высота %d рядов, рисунок $%04X' % (width, rows, q + 2))
         grid = brush_rows(q + 2, width, rows)
     elif 'данные' in o:
-        d = o['данные']
-        parts.append('клеток в ряду %d, высота %d рядов, рисунок $%04X' % (d[0], d[1], d[2] | d[3] << 8))
-        grid = brush_rows(d[2] | d[3] << 8, d[0], d[1])
+        d = o['данные']           # $440, $448 (рисунок), $420 (клеток в ряду), $418 (высота) — порядок $E811
+        parts.append('клеток в ряду %d, высота %d рядов, рисунок $%04X' % (d[2], d[3], d[0] | d[1] << 8))
+        grid = brush_rows(d[0] | d[1] << 8, d[2], d[3])
     else:
         grid = []
     lines = []
@@ -135,59 +146,65 @@ def walk(start, corridor, limit=300):
     return out
 
 
-# начала потоков и выполненные команды из записи
-starts, runs, cur = {}, [], None
-for line in open(sys.argv[2]):
-    q = line.split()
-    if q[0] == 'R': cur = None
-    elif q[0] == 'B':
-        st, corr = int(q[1], 16), int(q[3])
-        starts.setdefault(st, corr)
-        cur = {'start': st, 'corr': corr, 'cmds': []}; runs.append(cur)
-    elif q[0] == 'C' and cur is not None:
-        cur['cmds'].append((int(q[1]), int(q[2], 16)))
+def main():
+  init(sys.argv[1])
+  # начала потоков и выполненные команды из записи
+  starts, runs, cur = {}, [], None
+  for line in open(sys.argv[2]):
+      q = line.split()
+      if q[0] == 'R': cur = None
+      elif q[0] == 'B':
+          st, corr = int(q[1], 16), int(q[3])
+          starts.setdefault(st, corr)
+          cur = {'start': st, 'corr': corr, 'cmds': []}; runs.append(cur)
+      elif q[0] == 'C' and cur is not None:
+          cur['cmds'].append((int(q[1]), int(q[2], 16)))
 
-if '--check' in sys.argv:
-    ok = bad = n = 0
-    for r in runs:
-        # идём по потоку, следуя туда же, куда пошла игра (переходы «повтора» — по факту)
-        p, pos = r['start'] + 2, None
-        good = True
-        for c, addr in r['cmds']:
-            if addr != p or rd(addr) != c:
-                good = False
-                print('расхождение: поток $%04X коридор %d — ожидалась команда по $%04X, была %d по $%04X'
-                      % (r['start'], r['corr'], p, c, addr))
-                break
-            n += 1
-            cc, prm, k, jump = entry(p, r['corr'])
-            if jump is not None: p = jump + 2
-            elif cc == 9:
-                # «повтор»: куда пошла игра — узнаем по следующей команде
-                nxt = r['cmds'][r['cmds'].index((c, addr)) + 1][1] if (c, addr) != r['cmds'][-1] else None
-                p = (w16(p + 1) + 2) if nxt == w16(p + 1) + 2 else p + k + 3
-            else: p = p + k + 3
-        ok += good; bad += not good
-    print('потоков сверено %d: совпало %d, расхождений %d; команд сверено %d' % (ok + bad, ok, bad, n))
-    sys.exit(0)
+  if '--check' in sys.argv:
+      ok = bad = n = 0
+      for r in runs:
+          # идём по потоку, следуя туда же, куда пошла игра (переходы «повтора» — по факту)
+          p, pos = r['start'] + 2, None
+          good = True
+          for c, addr in r['cmds']:
+              if addr != p or rd(addr) != c:
+                  good = False
+                  print('расхождение: поток $%04X коридор %d — ожидалась команда по $%04X, была %d по $%04X'
+                        % (r['start'], r['corr'], p, c, addr))
+                  break
+              n += 1
+              cc, prm, k, jump = entry(p, r['corr'])
+              if jump is not None: p = jump + 2
+              elif cc == 9:
+                  # «повтор»: куда пошла игра — узнаем по следующей команде
+                  nxt = r['cmds'][r['cmds'].index((c, addr)) + 1][1] if (c, addr) != r['cmds'][-1] else None
+                  p = (w16(p + 1) + 2) if nxt == w16(p + 1) + 2 else p + k + 3
+              else: p = p + k + 3
+          ok += good; bad += not good
+      print('потоков сверено %d: совпало %d, расхождений %d; команд сверено %d' % (ok + bad, ok, bad, n))
+      return
 
-print('# Коридоры: поток данных уровня\n')
-print('Банк 4. Позиция — пройденный путь прокрутки (+1 за 16 точек, один ряд клеток). Расшифровано по коду;')
-print('порядок команд сверен с записью (64 потока, 778 команд, 0 расхождений).\n')
-print('Экран коридора — ряды по 16 клеток ($4C0-$4CF). Основа ряда — узор фона (команда «фон»),')
-print('поверх рисуют до 8 кистей (команда «объекты»): у каждой столбец, сдвиг за ряд, сколько клеток')
-print('в ряду, высота рисунка в рядах, число повторов (∞ — пока не заменят), рисунок. В рисунке —')
-print('номера клеток (две цифры), «..» — пусто; верх рисунка — как на экране (первый ряд внизу).\n')
-for st, corr in sorted(starts.items(), key=lambda t: t[1]):
-    print('## Коридор %d — поток $%04X\n' % (corr, st))
-    for pos, p, c, prm in walk(st, corr):
-        if c == 6:
-            print('- **%d** — объекты (кисти рисунка уровня):' % pos)
-            for o in prm['объекты']:
-                txt, grid = brush_text(o)
-                print('  - %s' % txt)
-                if grid:
-                    print('    ```'); [print('    ' + g) for g in grid]; print('    ```')
-        else:
-            print('- **%d** — %s %s' % (pos, NAMES[c] if c < 10 else '?', ', '.join('%s %s' % kv for kv in prm.items())))
-    print()
+  print('# Коридоры: поток данных уровня\n')
+  print('Банк 4. Позиция — пройденный путь прокрутки (+1 за 16 точек, один ряд клеток). Расшифровано по коду;')
+  print('порядок команд сверен с записью (64 потока, 778 команд, 0 расхождений).\n')
+  print('Экран коридора — ряды по 16 клеток ($4C0-$4CF). Основа ряда — узор фона (команда «фон»),')
+  print('поверх рисуют до 8 кистей (команда «объекты»): у каждой столбец, сдвиг за ряд, сколько клеток')
+  print('в ряду, высота рисунка в рядах, число повторов (∞ — пока не заменят), рисунок. В рисунке —')
+  print('номера клеток (две цифры), «..» — пусто; верх рисунка — как на экране (первый ряд внизу).\n')
+  for st, corr in sorted(starts.items(), key=lambda t: t[1]):
+      print('## Коридор %d — поток $%04X\n' % (corr, st))
+      for pos, p, c, prm in walk(st, corr):
+          if c == 6:
+              print('- **%d** — объекты (кисти рисунка уровня):' % pos)
+              for o in prm['объекты']:
+                  txt, grid = brush_text(o)
+                  print('  - %s' % txt)
+                  if grid:
+                      print('    ```'); [print('    ' + g) for g in grid]; print('    ```')
+          else:
+              print('- **%d** — %s %s' % (pos, NAMES[c] if c < 10 else '?', ', '.join('%s %s' % kv for kv in prm.items())))
+      print()
+
+
+if __name__ == "__main__":
+    main()

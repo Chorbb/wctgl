@@ -138,6 +138,11 @@ static void trace_stat(Nes *n) {
         /* поток данных коридора: начало ($E58F, указатель $18) и каждая команда ($E6F0) */
         if (pc == 0xE58F)
             fprintf(stat_out, "B %04X %d %d %d\n", n->ram[0x18] | (n->ram[0x19] << 8), n->bank & 7, n->ram[0x51], n->ram[0x50]);
+        if (pc == 0xE974) {                        /* ряд клеток готов (фон + кисти) */
+            fprintf(stat_out, "W %d", n->ram[0xB0] | (n->ram[0xB1] << 8));
+            for (int k = 0; k < 16; k++) fprintf(stat_out, " %02X", n->ram[0x4C0 + k]);
+            fprintf(stat_out, "\n");
+        }
         if (pc == 0xE6F0)
             fprintf(stat_out, "C %d %04X %04X %d\n", n->cpu.a, (uint16_t)((n->ram[0xBC] | (n->ram[0xBD] << 8)) + n->cpu.y - 1),
                     n->ram[0xB0] | (n->ram[0xB1] << 8), n->bank & 7);
@@ -415,6 +420,33 @@ int main(int argc, char **argv) {
         }
         fclose(o);
         printf("statwatch: done\n");
+        return 0;
+    }
+
+    if (!strcmp(mode, "statedump")) {
+        /* для картинок уровня: в кадре 300 отрезка — память, CHR, палитра, PPUCTRL.
+         * Запись: "T" | отрезок(2) | коридор $51 | путь в кадре 290 (2) | путь в кадре 300 (2) | ctrl | RAM | CHR | PAL */
+        if (!use_snaps) { fprintf(stderr, "statedump: нужен snap.bin\n"); return 2; }
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/states.bin", "wb");
+        Nes *m = NULL; long recs = 0;
+        for (int si = s_from; si < s_to; si += s_step) {
+            cur_snap = &sl.snaps[si];
+            m = make_nes_into(m, rom, rom_size);
+            xlat_register_all(m); m->use_hooks = 1;
+            if (cur_snap->frame + 302 > sl.frames) continue;
+            uint16_t p290 = 0;
+            for (int f = 0; f <= 300; f++) {
+                nes_run_frame(m);
+                if (f == 290) p290 = (uint16_t)(m->fe_ram[0xB0] | (m->fe_ram[0xB1] << 8));
+            }
+            uint16_t p300 = (uint16_t)(m->fe_ram[0xB0] | (m->fe_ram[0xB1] << 8));
+            uint8_t h[9] = { 'T', (uint8_t)si, (uint8_t)(si >> 8), m->fe_ram[0x51], (uint8_t)p290, (uint8_t)(p290 >> 8),
+                             (uint8_t)p300, (uint8_t)(p300 >> 8), m->ppu.ctrl };
+            fwrite(h, 1, 9, o); fwrite(m->fe_ram, 1, 2048, o); fwrite(m->chr, 1, 8192, o); fwrite(m->ppu.pal, 1, 32, o);
+            recs++;
+        }
+        fclose(o);
+        printf("statedump: %ld states\n", recs);
         return 0;
     }
 
