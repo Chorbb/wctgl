@@ -8,6 +8,7 @@
 //              Enter — Start, Shift — Select, F5 — Reset, M — звук вкл/выкл,
 //              F7 — перечитать моды и начать заново, Esc — выход.
 // Сохранения:  F2 — сохранить, F4 — загрузить, F3 — следующая ячейка (1-3).
+// Читы:        F9 — бессмертие вкл/выкл.
 // Моды: файлы *.tglpatch в папке mods рядом с проектом (собираются tools/mod.py из .tglmod).
 // Геймпад:     крестовина/левый стик, нижняя кнопка — B, правая — A, Start, Back/Select.
 
@@ -31,6 +32,7 @@ public partial class Main : Node2D
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_patch_rom(int bank, int addr, byte[] data, int len);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_use_translation(int on);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_build_info(byte[] buf, int cap);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_cheats(int flags);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_size();
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_save(byte[] buf, int cap);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_load(byte[] buf, int len);
@@ -129,6 +131,7 @@ public partial class Main : Node2D
 
     double _msgTimer;
     int _slot = 1;
+    bool _immortal;
 
     void Flash(string text) { ShowMessage(text); _msgTimer = 2.5; }
 
@@ -248,6 +251,13 @@ public partial class Main : Node2D
             if (k.Keycode == Key.F5 && _running) tgl_reset();
             if (k.Keycode == Key.M) _muted = !_muted;
             if (k.Keycode == Key.F3) Flash($"Ячейка сохранения: {_slot = _slot % 3 + 1}");
+            if (k.Keycode == Key.F9 && _running)
+            {
+                _immortal = !_immortal;
+                tgl_cheats(_immortal ? 1 : 0);
+                GetWindow().Title = _immortal ? "The Guardian Legend — бессмертие" : "The Guardian Legend";
+                Flash(_immortal ? "Бессмертие: включено (F9)" : "Бессмертие: выключено");
+            }
             if (k.Keycode == Key.F2 && _running) SaveState();
             if (k.Keycode == Key.F4 && _running) LoadState();
             if (k.Keycode == Key.F7 && _running)

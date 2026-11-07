@@ -54,4 +54,8 @@ TGL_API int tgl_state_load(const uint8_t *buf, int len);
 /* Описание сборки ядра (UTF-8): дата сборки, число переведённых процедур и новых врагов. */
 TGL_API int tgl_build_info(char *buf, int cap);
 
+/* Читы для проверки модов: бит 0 — бессмертие (жизнь в конце каждого кадра = максимум).
+ * Возвращает прежние флаги. */
+TGL_API int tgl_cheats(int flags);
+
 #endif
