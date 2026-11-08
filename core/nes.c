@@ -1,6 +1,7 @@
 /* nes.c — шина, картридж UNROM, PPU, канал DMC, геймпад. Тайминг потактовый. */
 #include "rt.h"
 #include "nes.h"
+#include "custom.h"
 
 /* Таблица перехватов одна на программу: все копии состояния приставки ссылаются на неё. */
 static NesHooks g_hooks;
@@ -176,7 +177,8 @@ uint8_t nes_read(Nes *n, uint16_t a) {
     }
     if (a == 0x4015) return (uint8_t)((n->dmc.irq_flag ? 0x80 : 0) | (n->dmc.bytes_left ? 0x10 : 0) | apu_status(&n->apu));
     if (a == 0x4017) return 0x40;
-    if (a < 0x8000) return 0;
+    if (a < 0x6000) return 0;
+    if (a < 0x8000) return a < 0x6000 + MOD_WIN_SIZE ? custom_mod_mem[MOD_WIN_BASE + (a - 0x6000)] : 0;  /* записи модов, см. custom.h */
     if (a < 0xC000) return n->prg[n->bank * 0x4000 + (a - 0x8000)];
     return n->prg[(n->prg_banks - 1) * 0x4000 + (a - 0xC000)];
 }

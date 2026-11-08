@@ -6,3 +6,4 @@ far D76F
 7 DCF3 irq irq_handler
 # точки для модов: перевод проверяет там custom_find (свои узоры комнат — core/custom.c)
 hook 5 8243
+hook 5 80F4

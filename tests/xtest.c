@@ -57,6 +57,32 @@ static Nes *make_nes_into(Nes *n, const uint8_t *rom, long size) {
 }
 static Nes *make_nes(const uint8_t *rom, long size) { return make_nes_into(NULL, rom, size); }
 
+/* walk: свои кнопки вместо записи — «R60 D20 N10 B5» (буква кнопки, кадров; N — ничего,
+ * несколько букв подряд — вместе: RB30); до начала сценария — кнопки записи */
+static uint8_t walk_pad[100000]; static int walk_len, walk_from;
+static void walk_input(Nes *n) {
+    int f = (int)(n->ppu.frames_done - frame_base);
+    if (f < walk_from) { apply_input(n); return; }
+    n->pad_state = f - walk_from < walk_len ? walk_pad[f - walk_from] : 0;
+}
+static void walk_parse(const char *s) {
+    while (*s) {
+        while (*s == ' ') s++;
+        uint8_t b = 0;
+        for (; *s && (*s < '0' || *s > '9'); s++) {
+            switch (*s) { case 'A': b |= 1; break; case 'B': b |= 2; break; case 'S': b |= 8; break;
+                          case 'U': b |= 16; break; case 'D': b |= 32; break; case 'L': b |= 64; break; case 'R': b |= 128; break; }
+        }
+        int k = 0; while (*s >= '0' && *s <= '9') k = k * 10 + (*s++ - '0');
+        while (k-- > 0 && walk_len < (int)sizeof walk_pad) walk_pad[walk_len++] = b;
+    }
+}
+
+/* ramuse: счётчики обращений к RAM поверх обычной шины */
+static cpu_read_fn ru_rd; static cpu_write_fn ru_wr; static uint64_t *ru_rdn, *ru_wrn;
+static uint8_t ru_read(void *ctx, uint16_t a) { if (a < 0x2000) ru_rdn[a & 0x7FF]++; return ru_rd(ctx, a); }
+static void ru_write(void *ctx, uint16_t a, uint8_t v) { if (a < 0x2000) ru_wrn[a & 0x7FF]++; ru_wr(ctx, a, v); }
+
 /* ---------------------------------------------------------------- сравнение состояний */
 
 static int diff_state(const Nes *a, const Nes *b, char *why, int why_len) {
@@ -505,6 +531,61 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (!strcmp(mode, "walk")) {
+        /* пройти своими кнопками от снимка XT_SNAPS=a: XT_WALK_FROM=кадр начала, XT_WALK=сценарий;
+         * перевод включён. Вывод: «P кадр X Y» при смене комнаты, картинки XT_PPM/XT_PPMF. */
+        if (!use_snaps) { fprintf(stderr, "walk: нужен snap.bin\n"); return 2; }
+        cur_snap = &sl.snaps[s_from];
+        walk_from = getenv("XT_WALK_FROM") ? atoi(getenv("XT_WALK_FROM")) : 0;
+        if (getenv("XT_WALK")) walk_parse(getenv("XT_WALK"));
+        Nes *m = make_nes_into(NULL, rom, rom_size);
+        xlat_register_all(m); m->use_hooks = getenv("XT_EMU") ? 0 : 1;
+        m->frame_end_fn = walk_input;
+        int px = -1, py = -1;
+        for (int f = 0; f < frames; f++) {
+            nes_run_frame(m);
+            const uint8_t *r = m->fe_ram;
+            if (r[0x52] != px || r[0x53] != py) { px = r[0x52]; py = r[0x53]; printf("P %d %d %d  игрок %d,%d\n", f, px, py, r[0x530], r[0x518]); }
+            int fa = 0, fb = 0; if (getenv("XT_PPMF")) sscanf(getenv("XT_PPMF"), "%d:%d", &fa, &fb);
+            if (getenv("XT_PPM") && f >= fa && f < fb) {
+                char path[512]; snprintf(path, sizeof path, "%s/w_f%04d.ppm", getenv("XT_PPM"), f);
+                FILE *po = fopen(path, "wb");
+                fprintf(po, "P6 256 240 255\n");
+                for (int i = 0; i < 256 * 240; i++) {
+                    uint32_t c = NES_PALETTE[m->shown[i] & 63];
+                    fputc((c >> 16) & 255, po); fputc((c >> 8) & 255, po); fputc(c & 255, po);
+                }
+                fclose(po);
+            }
+        }
+        printf("walk: конец, комната %d,%d, игрок %d,%d\n", m->fe_ram[0x52], m->fe_ram[0x53], m->fe_ram[0x530], m->fe_ram[0x518]);
+        return 0;
+    }
+
+    if (!strcmp(mode, "ramuse")) {
+        /* какие байты RAM игра вообще трогает: эмулятором (без перевода) по отрезкам, каждое
+         * обращение процессора к $0000-$1FFF отмечается. Вывод: «U адрес чтений записей» для всех
+         * 2048 байт — свободные (0 0) можно занять под данные модов. */
+        if (!use_snaps) { fprintf(stderr, "ramuse: нужен snap.bin\n"); return 2; }
+        static uint64_t rd_n[2048], wr_n[2048];
+        Nes *m = NULL;
+        for (int si = s_from; si < s_to; si += s_step) {
+            cur_snap = &sl.snaps[si];
+            m = make_nes_into(m, rom, rom_size);
+            m->use_hooks = 0;
+            ru_rd = m->cpu.read; ru_wr = m->cpu.write; ru_rdn = rd_n; ru_wrn = wr_n;
+            m->cpu.read = ru_read; m->cpu.write = ru_write;
+            int segf = frames;
+            if (cur_snap->frame + 1 + (uint32_t)segf > sl.frames) segf = (int)(sl.frames - cur_snap->frame - 1);
+            for (int f = 0; f < segf; f++) nes_run_frame(m);
+            m->cpu.read = ru_rd; m->cpu.write = ru_wr;
+        }
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/ramuse.txt", "w");
+        for (int i = 0; i < 2048; i++) fprintf(o, "U %03X %llu %llu\n", i, (unsigned long long)rd_n[i], (unsigned long long)wr_n[i]);
+        fclose(o);
+        return 0;
+    }
+
     if (!strcmp(mode, "blockwatch")) {
         /* что делается с блоками комнат в настоящей игре: в лабиринте ($7F = 5) карта столкновений
          * $400-$45F (по 4 бита на клетку, класс из таблицы $83A5 банка 5) сравнивается с прошлым
@@ -581,9 +662,11 @@ int main(int argc, char **argv) {
                 int len = (b0 & 0x0F) + 1;
                 uint16_t rec = p;
                 p = (uint16_t)(p + len);
+                int ck = custom_mod_mem[MOD_ROOM_IDX + 24 * y + x];    /* своя комната мода */
+                if (ck) { const uint8_t *cr = custom_mod_mem + MOD_WIN_BASE + 16 * (ck - 1); b0 = cr[0]; len = 3; rec = (uint16_t)(0x6000 + 16 * (ck - 1)); }
                 if (b0 == 0x80) continue;                     /* комнаты нет */
                 /* зона: у записей с битом 7 — 0 (центр), иначе младшие 4 бита байта 2 (по записи) */
-                int area = (b0 & 0x80) || len < 3 ? 0 : (prg5[rec + 2 - 0x8000] & 0x0F);
+                int area = (b0 & 0x80) || len < 3 ? 0 : ((ck ? custom_mod_mem[MOD_WIN_BASE + 16 * (ck - 1) + 2] : prg5[rec + 2 - 0x8000]) & 0x0F);
                 w = *base; w.cpu.ctx = &w; w.frame_end_fn = NULL;
                 w.ram[0x52] = (uint8_t)x; w.ram[0x53] = (uint8_t)y; w.ram[0xA4] = 4; w.ram[0x50] = (uint8_t)area;
                 w.ram[0x30] &= (uint8_t)~0x60;              /* не у ворот коридора: шаблоны лабиринта ($A749) */

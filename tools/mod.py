@@ -14,6 +14,9 @@
                                                  (N/W/E/S тоже можно); правится и соседняя комната
     узор <X> <Y> <картинка.png>                  свой узор блоков комнаты: PNG 16×9, пиксель = клетка
     узор <X> <Y>                                 то же текстом: следующие 9 строк по 16 символов
+    комната <X> <Y> как <X2> <Y2>                новая комната в клетке X,Y (пустой или нет) — копия
+                                                 записи комнаты X2,Y2 (зона, враги, узор игры), но
+                                                 без проходов: их открыть командой «проход» ниже
 
 Свой узор кладётся в память модов ядра (банк 64, см. core/custom.h) — без ограничений формата
 игры. Цвета картинки и символы текста:
@@ -68,7 +71,8 @@ BLOCKS = [  # (символ, цвет картинки, значение кле�
     ('о', (255, 136, 0), 0x02), ('л', (136, 85, 0), 0x03),
     ('г', (0, 0, 255), 0x05), ('р', (128, 128, 128), 0x0A), ('ш', (255, 0, 255), 0x04),
 ]
-MOD_BANK, PAT_SLOTS = 64, 80
+MOD_BANK, PAT_SLOTS = 64, 78          # см. core/custom.h
+ROOM_IDX, ROOM_REC, ROOM_SLOTS = 0x3000, 0x3800, 128
 
 
 def pattern_from_png(path):
@@ -143,7 +147,8 @@ def main():
                     assert rm and rm['exists'] and len(rm['raw']) > 1, 'комнаты %d,%d нет' % (rx, ry)
                     v = rm['raw'][1] & ~b if close else rm['raw'][1] | b
                     rm['raw'][1] = v
-                    patches.append((5, rm['addr'] + 1, [v], raw.strip()))
+                    if not rm.get('custom'):
+                        patches.append((5, rm['addr'] + 1, [v], raw.strip()))
             elif cmd in ('узор', 'pattern'):
                 x, y = num(a[0]), num(a[1])
                 assert 0 <= x < 24 and 0 <= y < 24, 'комната вне карты 24×24'
@@ -160,6 +165,18 @@ def main():
                         if r2: rows.append(r2)
                     room_pat[(x, y)] = pattern_from_text(rows)
                 assert len(room_pat) <= PAT_SLOTS, 'своих узоров не больше %d' % PAT_SLOTS
+            elif cmd in ('комната', 'room'):
+                assert len(a) == 5 and a[2].lower() in ('как', 'like'), 'формат: комната X Y как X2 Y2'
+                x, y, sx, sy = num(a[0]), num(a[1]), num(a[3]), num(a[4])
+                assert 0 <= x < 24 and 0 <= y < 24, 'комната вне карты 24×24'
+                src_rm = rooms.get((sx, sy))
+                assert src_rm and src_rm['exists'] and not src_rm['special'], 'в %d,%d нет обычной комнаты' % (sx, sy)
+                r = list(src_rm['raw'])
+                assert len(r) <= 16
+                r[1] &= 0x0F                               # проходы — отдельными командами
+                rooms[(x, y)] = dict(addr=None, raw=r, exists=True, special=False, custom=True,
+                                     zone=src_rm['zone'], doors='', pattern=src_rm['pattern'])
+                assert sum(1 for v in rooms.values() if v.get('custom')) <= ROOM_SLOTS, 'своих комнат не больше %d' % ROOM_SLOTS
             elif cmd in ('байт', 'byte'):
                 bank, addr = num(a[0]), num(a[1])
                 patches.append((bank, addr, [num(x) & 255 for x in a[2:]], raw.strip()))
@@ -170,6 +187,12 @@ def main():
     for n, ((x, y), cells) in enumerate(sorted(room_pat.items()), 1):
         patches.append((MOD_BANK, 24 * y + x, [n], 'узор %d %d → свой узор %d' % (x, y, n)))
         patches.append((MOD_BANK, 0x400 + 144 * (n - 1), cells, 'клетки своего узора %d' % n))
+    customs = sorted(k for k, v in rooms.items() if v.get('custom'))
+    for n, (x, y) in enumerate(customs, 1):
+        r = rooms[(x, y)]['raw']
+        patches.append((MOD_BANK, ROOM_IDX + 24 * y + x, [n], 'комната %d %d → своя запись %d' % (x, y, n)))
+        patches.append((MOD_BANK, ROOM_REC + 16 * (n - 1), r, 'своя запись %d (проходы %s)' % (
+            n, ''.join(d for d, bit, *_ in labyrinth.DOORS if r[1] & bit) or 'нет')))
     for bank, addr, data, text in patches:
         if bank == MOD_BANK:
             if not (0 <= addr and addr + len(data) <= 0x4000): errors.append('%s: вне памяти модов' % text)

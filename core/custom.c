@@ -118,7 +118,7 @@ static int room_pattern_of(Nes *n) {
     int x = n->ram[0x52], y = n->ram[0x53];
     if (x >= 24 || y >= 24) return 0;
     int k = custom_mod_mem[24 * y + x];
-    return (k >= 1 && k <= 80) ? k : 0;
+    return (k >= 1 && k <= MOD_PAT_SLOTS) ? k : 0;
 }
 
 static void room_pattern(Nes *n) {
@@ -129,6 +129,37 @@ static void room_pattern(Nes *n) {
     n->cpu.pc = PAT_AFTER;
 }
 
+/* ---------------------------------------------------------------- свои комнаты
+ * Банк 5 $80F4 — RTS в конце $8071: указатели на записи комнаты ($E4) и соседей (север $E0,
+ * запад $E2, восток $E6, юг $E8) уже найдены по ROM. Если у какой-то из этих клеток своя
+ * запись, указатель направляем на неё (окно $6000), затем выходим, как RTS. */
+#define ROOMS_ADDR 0x80F4
+
+static int room_rec(int x, int y) {
+    if (x < 0 || y < 0 || x >= 24 || y >= 24) return 0;
+    int k = custom_mod_mem[MOD_ROOM_IDX + 24 * y + x];
+    return (k >= 1 && k <= MOD_WIN_SIZE / 16) ? k : 0;
+}
+static const int8_t NB[5][3] = { {0, -1, 0xE0}, {-1, 0, 0xE2}, {0, 0, 0xE4}, {1, 0, 0xE6}, {0, 1, 0xE8} };
+
+static int rooms_here(Nes *n) {
+    int x = n->ram[0x52], y = n->ram[0x53];
+    for (int i = 0; i < 5; i++) if (room_rec(x + NB[i][0], y + NB[i][1])) return 1;
+    return 0;
+}
+
+static void room_records(Nes *n) {
+    int x = n->ram[0x52], y = n->ram[0x53];
+    for (int i = 0; i < 5; i++) {
+        int k = room_rec(x + NB[i][0], y + NB[i][1]);
+        if (!k) continue;
+        uint16_t a = (uint16_t)(0x6000 + 16 * (k - 1));
+        n->ram[(uint8_t)NB[i][2]] = (uint8_t)a; n->ram[(uint8_t)(NB[i][2] + 1)] = (uint8_t)(a >> 8);
+    }
+    tick(n, 60);
+    custom_rts(n);
+}
+
 const CustomInfo custom_table[] = {
     { 6, SINE_ADDR, sine_flyer, "sine_flyer",
       "наследник типа 66: синусоида вниз, выстрел раз в 64 кадра" },
@@ -137,6 +168,7 @@ const int custom_count = (int)(sizeof custom_table / sizeof custom_table[0]);
 
 static nes_hook_fn custom_lookup(Nes *n, uint16_t addr) {
     if (addr == PAT_ADDR && (n->bank & 7) == 5) return room_pattern_of(n) ? room_pattern : 0;
+    if (addr == ROOMS_ADDR && (n->bank & 7) == 5) return rooms_here(n) ? room_records : 0;
 #ifdef CUSTOM_DEBUG
     if (addr == 0xBFD8) { extern int printf(const char *, ...); printf("lookup BFD8 bank %d\n", n->bank); }
 #endif
