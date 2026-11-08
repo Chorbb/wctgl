@@ -6,3 +6,4 @@ build/
 *.ppm
 # ядро для Godot содержит код, переведённый из ROM
 godot/native/*.dll
+__pycache__/
