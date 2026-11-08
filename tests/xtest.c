@@ -399,6 +399,21 @@ int main(int argc, char **argv) {
     long rom_size;
     uint8_t *rom = rl_read_file(argv[2], &rom_size);
     if (!rom) { fprintf(stderr, "cannot read rom\n"); return 2; }
+    if (getenv("XT_PATCH")) {
+        /* мод: файл .tglpatch (tools/mod.py) — строки «банк адрес байты…» прямо в копию ROM */
+        FILE *pf = fopen(getenv("XT_PATCH"), "r");
+        if (!pf) { fprintf(stderr, "cannot read patch\n"); return 2; }
+        char line[1024]; int np = 0, nbank = (rom[4] ? rom[4] : 8);
+        while (fgets(line, sizeof line, pf)) {
+            if (line[0] == '#' || line[0] == 't' || line[0] == '\n') continue;
+            char *q = line; int bank = (int)strtol(q, &q, 10); int addr = (int)strtol(q, &q, 16);
+            long off = 16 + (long)bank * 0x4000 + (addr - (bank == nbank - 1 ? 0xC000 : 0x8000));
+            for (;;) { char *q2; long v = strtol(q, &q2, 16); if (q2 == q) break; q = q2;
+                       if (off >= 16 && off < rom_size) rom[off] = (uint8_t)v; off++; np++; }
+        }
+        fclose(pf);
+        fprintf(stderr, "patch: %d bytes\n", np);
+    }
     int frames = atoi(argv[4]);
     int s_from = 0, s_to = 1, s_step = 1;
     int e = snaplog_load(&sl, argv[3]);

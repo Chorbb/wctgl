@@ -10,6 +10,8 @@
     урон_оружия <номер> <уровень 1-3> <значение> спецоружие, $86F5 (банк 6)
     волна <банк> <адрес> <n> <тип>               n-й враг/генератор сценария волн (с 1) → другой тип
     байт <банк> <адрес> <значение> [...]         любые байты (адрес процессора, $ — шестнадцатеричный)
+    проход <X> <Y> <С|З|В|Ю> [закрыть]            лабиринт: открыть/закрыть проход из комнаты X,Y
+                                                 (N/W/E/S тоже можно); правится и соседняя комната
 
 Правка попадает в копию ROM в памяти; исходный файл не меняется. Если правка задевает
 исполняемый код (по build/coverage.txt), инструмент предупреждает и пишет в патч строку
@@ -22,6 +24,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from disasm import Rom, OPS, SIZE
 import waves
+import labyrinth
 
 
 def num(s):
@@ -49,6 +52,7 @@ def main():
     rom_path, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
     rom = Rom(rom_path)
     waves.init(rom_path)
+    rooms, _ = labyrinth.read(rom)
     code = code_bytes(os.path.join(os.path.dirname(dst) or '.', 'coverage.txt'), rom) or \
         code_bytes('build/coverage.txt', rom)
     patches, errors, touches_code = [], [], []
@@ -74,6 +78,19 @@ def main():
                 kind, _, taddr = items[n - 1]
                 assert 3 <= t <= 127, 'тип врага 3..127'
                 patches.append((bank, taddr, [t | (0x80 if kind == 'генератор' else 0)], raw.strip()))
+            elif cmd in ('проход', 'door'):
+                x, y = num(a[0]), num(a[1])
+                d = {'с': 'N', 'з': 'W', 'в': 'E', 'ю': 'S'}.get(a[2].lower(), a[2].upper())
+                close = len(a) > 3 and a[3].lower() in ('закрыть', 'close')
+                dd = {k: (bit, dx, dy, opp) for k, bit, dx, dy, opp in labyrinth.DOORS}
+                assert d in dd, 'направление: С, З, В или Ю'
+                bit, dx, dy, opp = dd[d]
+                for (rx, ry, b) in ((x, y, bit), (x + dx, y + dy, opp)):
+                    rm = rooms.get((rx, ry))
+                    assert rm and rm['exists'] and len(rm['raw']) > 1, 'комнаты %d,%d нет' % (rx, ry)
+                    v = rm['raw'][1] & ~b if close else rm['raw'][1] | b
+                    rm['raw'][1] = v
+                    patches.append((5, rm['addr'] + 1, [v], raw.strip()))
             elif cmd in ('байт', 'byte'):
                 bank, addr = num(a[0]), num(a[1])
                 patches.append((bank, addr, [num(x) & 255 for x in a[2:]], raw.strip()))
