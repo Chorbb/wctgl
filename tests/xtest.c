@@ -505,6 +505,60 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (!strcmp(mode, "blockwatch")) {
+        /* что делается с блоками комнат в настоящей игре: в лабиринте ($7F = 5) карта столкновений
+         * $400-$45F (по 4 бита на клетку, класс из таблицы $83A5 банка 5) сравнивается с прошлым
+         * кадром. Вывод: «B отрезок кадр X Y клетка было стало объекты» — объекты: типы в $0500
+         * слотах, ставшие ненулевыми в этом кадре. При смене комнаты сравнение начинается заново. */
+        if (!use_snaps) { fprintf(stderr, "blockwatch: нужен snap.bin\n"); return 2; }
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/blockwatch.txt", "w");
+        Nes *m = NULL;
+        for (int si = s_from; si < s_to; si += s_step) {
+            cur_snap = &sl.snaps[si];
+            m = make_nes_into(m, rom, rom_size);
+            xlat_register_all(m); m->use_hooks = 1;
+            int segf = frames;
+            if (cur_snap->frame + 1 + (uint32_t)segf > sl.frames) segf = (int)(sl.frames - cur_snap->frame - 1);
+            uint8_t prev[96], pobj[24], pchips[2] = {0, 0}; int have = 0, px = -1, py = -1;
+            for (int f = 0; f < segf; f++) {
+                nes_run_frame(m);
+                if (getenv("XT_PPM")) {      /* кадры с a по b-1 (XT_PPMF=a:b) — картинками */
+                    int fa = 0, fb = 0; if (getenv("XT_PPMF")) sscanf(getenv("XT_PPMF"), "%d:%d", &fa, &fb);
+                    if (f >= fa && f < fb) {
+                        char path[512]; snprintf(path, sizeof path, "%s/s%03d_f%04d.ppm", getenv("XT_PPM"), si, f);
+                        FILE *po = fopen(path, "wb");
+                        fprintf(po, "P6 256 240 255\n");
+                        for (int i = 0; i < 256 * 240; i++) {
+                            uint32_t c = NES_PALETTE[m->shown[i] & 63];
+                            fputc((c >> 16) & 255, po); fputc((c >> 8) & 255, po); fputc(c & 255, po);
+                        }
+                        fclose(po);
+                    }
+                }
+                const uint8_t *r = m->fe_ram;
+                if (r[0x7F] != 5 || r[0x52] != px || r[0x53] != py) {
+                    have = 0; px = r[0x52]; py = r[0x53];
+                    if (r[0x7F] != 5) continue;
+                }
+                if (have) {
+                    for (int c = 0; c < 192; c++) {
+                        int a = (prev[c >> 1] >> ((c & 1) ? 0 : 4)) & 15, b = (r[0x400 + (c >> 1)] >> ((c & 1) ? 0 : 4)) & 15;
+                        if (a == b) continue;
+                        fprintf(o, "B %d %d %d %d %d %X %X p%d,%d k%02X", si, f, px, py, c, a, b, r[0x530], r[0x518], m->pad_state);
+                        for (int k = 0; k < 24; k++) if (!pobj[k] && r[0x500 + k]) fprintf(o, " %d:%02X", k, r[0x500 + k]);
+                        fprintf(o, "\n");
+                    }
+                }
+                if (have && (r[0x4C] != pchips[0] || r[0x4D] != pchips[1]))
+                    fprintf(o, "C %d %d %d %d %d %d\n", si, f, px, py, pchips[0] | pchips[1] << 8, r[0x4C] | r[0x4D] << 8);
+                memcpy(prev, r + 0x400, 96); memcpy(pobj, r + 0x500, 24); have = 1;
+                pchips[0] = r[0x4C]; pchips[1] = r[0x4D];
+            }
+        }
+        fclose(o);
+        return 0;
+    }
+
     if (!strcmp(mode, "roomgen")) {
         /* все комнаты лабиринта, построенные процедурами самой игры: от снимка XT_SNAPS=a
          * (игрок в лабиринте) для каждой клетки сетки 24×24 с записью комнаты — X/Y в $52/$53,
