@@ -8,7 +8,7 @@
 //              Enter — Start, Shift — Select, F5 — Reset, M — звук вкл/выкл,
 //              F7 — перечитать моды и начать заново, Esc — выход.
 // Сохранения:  F2 — сохранить, F4 — загрузить, F3 — следующая ячейка (1-3).
-// Читы:        F9 — бессмертие вкл/выкл.
+// Читы:        F9 — бессмертие вкл/выкл, F8 — убивать с одного попадания вкл/выкл.
 // Моды: файлы *.tglpatch в папке mods рядом с проектом (собираются tools/mod.py из .tglmod).
 // Геймпад:     крестовина/левый стик, нижняя кнопка — B, правая — A, Start, Back/Select.
 
@@ -131,7 +131,17 @@ public partial class Main : Node2D
 
     double _msgTimer;
     int _slot = 1;
-    bool _immortal;
+    bool _immortal, _oneHit;
+
+    // Читы ядра: бит 0 — бессмертие, бит 1 — враг гибнет с первого попадания снаряда игрока
+    void ApplyCheats()
+    {
+        tgl_cheats((_immortal ? 1 : 0) | (_oneHit ? 2 : 0));
+        string t = "The Guardian Legend";
+        if (_immortal) t += " — бессмертие";
+        if (_oneHit) t += " — с одного попадания";
+        GetWindow().Title = t;
+    }
 
     void Flash(string text) { ShowMessage(text); _msgTimer = 2.5; }
 
@@ -254,9 +264,14 @@ public partial class Main : Node2D
             if (k.Keycode == Key.F9 && _running)
             {
                 _immortal = !_immortal;
-                tgl_cheats(_immortal ? 1 : 0);
-                GetWindow().Title = _immortal ? "The Guardian Legend — бессмертие" : "The Guardian Legend";
+                ApplyCheats();
                 Flash(_immortal ? "Бессмертие: включено (F9)" : "Бессмертие: выключено");
+            }
+            if (k.Keycode == Key.F8 && _running)
+            {
+                _oneHit = !_oneHit;
+                ApplyCheats();
+                Flash(_oneHit ? "Убивать с одного попадания: включено (F8)" : "Убивать с одного попадания: выключено");
             }
             if (k.Keycode == Key.F2 && _running) SaveState();
             if (k.Keycode == Key.F4 && _running) LoadState();

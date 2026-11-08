@@ -16,11 +16,11 @@ static double audio_rate = 48000.0;   /* частота вывода звука 
  * игра кнопки не читает (код сворачивается сразу за концом кадра, см. frame_done). */
 static uint8_t buttons_of_call;
 static int deferred;
-static int cheats;                     /* бит 0 — бессмертие */
+static int cheats;                     /* бит 0 — бессмертие, бит 1 — убивать с одного попадания */
 
 static void on_frame_end(Nes *n) {
     /* бессмертие: в конце каждого кадра жизнь (текущая и цель счётчика) снова равна максимуму */
-    if ((cheats & 1) && n->ram[0x47]) { n->ram[0x48] = n->ram[0x47]; n->ram[0x49] = n->ram[0x47]; }
+    custom_cheats(n, cheats);
     uint64_t want = n->ppu.frames_done - 1;   /* номер вызова, чьи кнопки нужны */
     if (want <= n->frame) { n->pad_state = buttons_of_call; deferred = 0; }
     else deferred = 1;
@@ -197,5 +197,5 @@ int tgl_build_info(char *buf, int cap) {
     return p;
 }
 
-/* Читы: бит 0 — бессмертие. Возвращает прежнее значение. */
+/* Читы: бит 0 — бессмертие, бит 1 — убивать с одного попадания (custom.c). Возвращает прежнее значение. */
 int tgl_cheats(int flags) { int old = cheats; cheats = flags; return old; }

@@ -51,4 +51,8 @@ extern uint8_t custom_mod_mem[MOD_MEM_SIZE];
 void custom_mod_clear(void);
 int custom_mod_write(int addr, const uint8_t *data, int len);
 
+/* Читы (вызывать в конце каждого кадра): бит 0 — бессмертие (жизнь = максимум), бит 1 — враг
+ * гибнет с первого попадания снаряда игрока (перехват $D31C в custom.c). */
+void custom_cheats(Nes *n, int flags);
+
 #endif

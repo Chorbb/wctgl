@@ -95,6 +95,30 @@ static void sine_flyer(Nes *n) {
     custom_rts(n);
 }
 
+/* ---------------------------------------------------------------- читы */
+static int cheat_flags;
+
+void custom_cheats(Nes *n, int flags) {
+    cheat_flags = flags;
+    if ((flags & 1) && n->ram[0x47]) { n->ram[0x48] = n->ram[0x47]; n->ram[0x49] = n->ram[0x47]; }
+}
+
+/* Убивать с одного попадания: банк 7 $D31C — объект X получает урон объекта Y
+ * (hp(X) -= damage(Y), не ниже 0; $D31C-$D329). Если Y — снаряд игрока (ячейки 1-4; их
+ * ищет $D348), здоровье X сразу 0, дальше игра как обычно ($D32A: гибель при 0). */
+#define HIT_ADDR  0xD31C
+#define HIT_AFTER 0xD32A
+static int one_hit_here(Nes *n) {
+    return (cheat_flags & 2) && n->cpu.y >= 1 && n->cpu.y <= 4;
+}
+static void one_hit(Nes *n) {
+    n->ram[0x590 + n->cpu.x] = 0;
+    n->cpu.a = 0;
+    n->cpu.p = (uint8_t)((n->cpu.p & ~0x83) | 0x02);   /* как SBC с займом и STA 0: C=0, Z=1, N=0 */
+    tick(n, 4 + 2 + 4 + 2 + 2 + 5);
+    n->cpu.pc = HIT_AFTER;
+}
+
 /* ---------------------------------------------------------------- память модов */
 uint8_t custom_mod_mem[MOD_MEM_SIZE];
 
@@ -169,6 +193,7 @@ const int custom_count = (int)(sizeof custom_table / sizeof custom_table[0]);
 static nes_hook_fn custom_lookup(Nes *n, uint16_t addr) {
     if (addr == PAT_ADDR && (n->bank & 7) == 5) return room_pattern_of(n) ? room_pattern : 0;
     if (addr == ROOMS_ADDR && (n->bank & 7) == 5) return rooms_here(n) ? room_records : 0;
+    if (addr == HIT_ADDR) return one_hit_here(n) ? one_hit : 0;
 #ifdef CUSTOM_DEBUG
     if (addr == 0xBFD8) { extern int printf(const char *, ...); printf("lookup BFD8 bank %d\n", n->bank); }
 #endif

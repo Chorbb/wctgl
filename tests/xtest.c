@@ -60,7 +60,15 @@ static Nes *make_nes(const uint8_t *rom, long size) { return make_nes_into(NULL,
 /* walk: свои кнопки вместо записи — «R60 D20 N10 B5» (буква кнопки, кадров; N — ничего,
  * несколько букв подряд — вместе: RB30); до начала сценария — кнопки записи */
 static uint8_t walk_pad[100000]; static int walk_len, walk_from;
+static int walk_cheats;
+static Nes *hpw_n; static cpu_write_fn hpw_wr;
+static void hpw_write(void *ctx, uint16_t a, uint8_t v) {
+    if (a >= 0x590 && a < 0x5A8 && v < hpw_n->ram[a] && a > 0x594)
+        printf("W pc %04X банк %d слот %d %d→%d X=%d Y=%d\n", hpw_n->cpu.pc, hpw_n->bank & 7, a - 0x590, hpw_n->ram[a], v, hpw_n->cpu.x, hpw_n->cpu.y);
+    hpw_wr(ctx, a, v);
+}
 static void walk_input(Nes *n) {
+    custom_cheats(n, walk_cheats);
     int f = (int)(n->ppu.frames_done - frame_base);
     if (f < walk_from) { apply_input(n); return; }
     n->pad_state = f - walk_from < walk_len ? walk_pad[f - walk_from] : 0;
@@ -538,14 +546,32 @@ int main(int argc, char **argv) {
         cur_snap = &sl.snaps[s_from];
         walk_from = getenv("XT_WALK_FROM") ? atoi(getenv("XT_WALK_FROM")) : 0;
         if (getenv("XT_WALK")) walk_parse(getenv("XT_WALK"));
+        else walk_from = 1 << 30;                  /* без сценария — кнопки записи */
+        walk_cheats = getenv("XT_CHEAT") ? atoi(getenv("XT_CHEAT")) : 0;
         Nes *m = make_nes_into(NULL, rom, rom_size);
         xlat_register_all(m); m->use_hooks = getenv("XT_EMU") ? 0 : 1;
         m->frame_end_fn = walk_input;
-        int px = -1, py = -1;
+        if (getenv("XT_HPW")) { hpw_n = m; hpw_wr = m->cpu.write; m->cpu.write = hpw_write; m->use_hooks = 0; }
+        int px = -1, py = -1; uint8_t prev_t[24] = {0}, prev_hp[24] = {0}; int hits[24] = {0};
         for (int f = 0; f < frames; f++) {
             nes_run_frame(m);
             const uint8_t *r = m->fe_ram;
             if (r[0x52] != px || r[0x53] != py) { px = r[0x52]; py = r[0x53]; printf("P %d %d %d  игрок %d,%d\n", f, px, py, r[0x530], r[0x518]); }
+            for (int k = 5; k < 24; k++) {
+                if (prev_t[k] && r[0x500 + k] == prev_t[k] && r[0x590 + k] < prev_hp[k]) {
+                    hits[k]++;
+                    if (getenv("XT_HITS")) {
+                        printf("H %d слот %d тип %02X %d→%d  объекты:", f, k, r[0x500 + k] & 0x7F, prev_hp[k], r[0x590 + k]);
+                        for (int j = 0; j < 24; j++) if (r[0x500 + j]) printf(" %d:%02X/%d", j, r[0x500 + j] & 0x7F, r[0x5A8 + j]);
+                        printf("\n");
+                    }
+                }
+                if (prev_t[k] != r[0x500 + k]) {
+                    if (getenv("XT_KILLS") && prev_t[k] && prev_hp[k] && !r[0x590 + k]) printf("K %d %02X попаданий %d\n", f, prev_t[k] & 0x7F, hits[k] + 1);
+                    if (!(r[0x500 + k] & 0x80) || !(prev_t[k] & 0x80)) hits[k] = 0;
+                }
+            }
+            memcpy(prev_t, r + 0x500, 24); memcpy(prev_hp, r + 0x590, 24);
             int fa = 0, fb = 0; if (getenv("XT_PPMF")) sscanf(getenv("XT_PPMF"), "%d:%d", &fa, &fb);
             if (getenv("XT_PPM") && f >= fa && f < fb) {
                 char path[512]; snprintf(path, sizeof path, "%s/w_f%04d.ppm", getenv("XT_PPM"), f);
@@ -558,7 +584,9 @@ int main(int argc, char **argv) {
                 fclose(po);
             }
         }
-        printf("walk: конец, комната %d,%d, игрок %d,%d\n", m->fe_ram[0x52], m->fe_ram[0x53], m->fe_ram[0x530], m->fe_ram[0x518]);
+        printf("walk: конец, комната %d,%d, игрок %d,%d, очки ", m->fe_ram[0x52], m->fe_ram[0x53], m->fe_ram[0x530], m->fe_ram[0x518]);
+        for (int i = 0; i < 7; i++) printf("%d", m->fe_ram[0x170 + i]);
+        printf(", жизнь %d\n", m->fe_ram[0x48]);
         return 0;
     }
 
