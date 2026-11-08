@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """labyrinth_map.py — карта лабиринта из комнат, построенных игрой в записи.
 
-    python3 tools/labyrinth_map.py rom.nes build/rooms.txt build/labyrinth.png [масштаб]
+    python3 tools/labyrinth_map.py rom.nes build/rooms.txt build/labyrinth.png [масштаб] [build/roomgen.txt]
+
+roomgen.txt (необязательно) — все комнаты, построенные `xtest roomgen` процедурами игры; ими
+дополняются комнаты, где игрок в записи не был. Графику (CHR, наборы клеток, палитру) для них
+берём от записанной комнаты той же зоны: у roomgen графика одна — та, что была в снимке.
 
 rooms.txt — от `XT_ROOM=1 xtest statwatch`: строки K (содержимое CHR) и M (комната: X, Y, зона,
 адрес записи комнаты, 192 клетки $740-$7FF = 16×12, наборы клеток $460-$477, палитра).
@@ -28,7 +32,16 @@ def load(path):
             cells = bytes.fromhex(p[7]); sets = bytes.fromhex(p[8]); pal = bytes.fromhex(p[9])
             if len(cells) != 192: continue
             if len(set(cells)) < 3: continue           # снято до постройки (пустая сетка)
-            rooms[(x, y)] = dict(area=area, rec=rec, chr=h, ctrl=ctrl, cells=cells, sets=sets, pal=pal)
+            dark = set(pal) <= {0x0F}                 # палитра ещё чёрная (снято до проявления)
+            old = rooms.get((x, y))
+            if old and dark and not old['dark']: continue
+            rooms[(x, y)] = dict(area=area, rec=rec, chr=h, ctrl=ctrl, cells=cells, sets=sets, pal=pal, dark=dark)
+    # чёрной палитре — палитру другой комнаты с той же графикой
+    pal_by_chr = {}
+    for rm in rooms.values():
+        if not rm['dark']: pal_by_chr.setdefault(rm['chr'], rm['pal'])
+    for rm in rooms.values():
+        if rm['dark'] and rm['chr'] in pal_by_chr: rm['pal'], rm['dark'] = pal_by_chr[rm['chr']], False
     return chr_by_hash, rooms
 
 
@@ -49,6 +62,30 @@ def main():
     chr_by_hash, rooms = load(sys.argv[2])
     out = sys.argv[3]
     scale = float(sys.argv[4]) if len(sys.argv) > 4 else 0.25
+    if len(sys.argv) > 5:
+        gchr, gen = load(sys.argv[5])
+        by_area = {}
+        for rm in rooms.values():
+            if not rm['dark']: by_area.setdefault(rm['area'], rm)
+        added = 0
+        for k, rm in gen.items():
+            if k in rooms and not rooms[k]['dark']: continue
+            if k in rooms:                              # графика из записи, палитра из roomgen
+                chr_by_hash.update(gchr); rooms[k]['pal'] = rm['pal']; rooms[k]['dark'] = False; rooms[k]['fixed'] = True; continue
+            look = by_area.get(rm['area'])
+            if look: rm = dict(rm, chr=look['chr'], sets=look['sets'], pal=look['pal'], ctrl=look['ctrl'])
+            else: chr_by_hash.update(gchr)
+            rooms[k] = rm; added += 1
+        print('из roomgen добавлено комнат: %d' % added)
+    # обычные комнаты, снятые только с чёрной палитрой, — вид записанной комнаты той же зоны
+    look_by_area = {}
+    for rm in rooms.values():
+        if not rm['dark'] and not rm.get('fixed') and not rom.byte(5, rm['rec']) & 0x80:
+            look_by_area.setdefault(rm['area'], rm)
+    for rm in rooms.values():
+        if rm.get('fixed') and not rom.byte(5, rm['rec']) & 0x80 and rm['area'] in look_by_area:
+            lk = look_by_area[rm['area']]
+            rm.update(chr=lk['chr'], sets=lk['sets'], pal=lk['pal'], ctrl=lk['ctrl'])
     W, H = int(256 * scale), int(192 * scale)
     big = Image.new('RGB', (24 * W + 2 * 24, 24 * H + 2 * 24), (16, 16, 16))
     dr = ImageDraw.Draw(big)

@@ -515,6 +515,7 @@ int main(int argc, char **argv) {
                 int area = (b0 & 0x80) || len < 3 ? 0 : (prg5[rec + 2 - 0x8000] & 0x0F);
                 w = *base; w.cpu.ctx = &w; w.frame_end_fn = NULL;
                 w.ram[0x52] = (uint8_t)x; w.ram[0x53] = (uint8_t)y; w.ram[0xA4] = 4; w.ram[0x50] = (uint8_t)area;
+                w.ram[0x30] &= (uint8_t)~0x60;              /* не у ворот коридора: шаблоны лабиринта ($A749) */
                 w.bank = 5; w.ram[0x04] = 5;
                 memset(w.ram + 0x740, 0, 192);
                 static const uint16_t steps[3] = { 0x8071, 0x8121, 0x8158 };   /* $8155 без JSR $C045 (выключение экрана и ожидание кадров) */
@@ -530,8 +531,30 @@ int main(int argc, char **argv) {
                     if (w.cpu.pc != ret) { ok = 0; fprintf(o, "# step %04X stuck\n", steps[k]); }
                     w.bank = 5;
                 }
+                /* у записей с битом 7 (особые комнаты: вход в коридор, магазин и т. п.) игра строит
+                 * не комнату карты, а её «внутренность»: код банка 7 с $EE1D выбирает вид ($51) по
+                 * флагам прогресса $04A0/$04A9, грузит графику ($8000), ставит $50=0, $30|=$20 и
+                 * строит ($8003). Исполняем его как есть, до возврата в $EE83. */
+                if (ok && (b0 & 0x80)) {
+                    memset(w.ram + 0x740, 0, 192);
+                    w.cpu.pc = 0xEE1D;
+                    long guard = 0;
+                    while (w.cpu.pc != 0xEE83 && guard++ < 3000000 && !w.cpu.jammed) nes_step(&w);
+                    if (w.cpu.pc != 0xEE83) { ok = 0; fprintf(o, "# special stuck\n"); }
+                    area = w.ram[0x51] | 0x100;                /* в выводе: 256 + вид особой комнаты */
+                }
                 if (!ok) { fprintf(o, "X %d %d pc %04X bank %d\n", x, y, w.cpu.pc, w.bank); continue; }
-                fprintf(o, "M %d %d %d %04X 00000000 %02X ", x, y, area, rec, w.ppu.ctrl);
+                {
+                    static uint32_t last_h; uint32_t h = 2166136261u;
+                    for (int i = 0; i < 8192; i++) { h ^= w.chr[i]; h *= 16777619u; }
+                    if (h != last_h) {
+                        fprintf(o, "K %08X ", h);
+                        for (int i = 0; i < 8192; i++) fprintf(o, "%02X", w.chr[i]);
+                        fprintf(o, "\n");
+                        last_h = h;
+                    }
+                    fprintf(o, "M %d %d %d %04X %08X %02X ", x, y, area, rec, h, w.ppu.ctrl);
+                }
                 for (int i = 0; i < 192; i++) fprintf(o, "%02X", w.ram[0x740 + i]);
                 fprintf(o, " ");
                 for (int i = 0; i < 24; i++) fprintf(o, "%02X", w.ram[0x460 + i]);
