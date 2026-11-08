@@ -57,13 +57,11 @@ def room_image(rom, chr_by_hash, rm):
     return img
 
 
-def main():
-    rom = Rom(sys.argv[1])
-    chr_by_hash, rooms = load(sys.argv[2])
-    out = sys.argv[3]
-    scale = float(sys.argv[4]) if len(sys.argv) > 4 else 0.25
-    if len(sys.argv) > 5:
-        gchr, gen = load(sys.argv[5])
+def load_all(rom, rooms_path, gen_path=None):
+    """комнаты из записи, дополненные roomgen; чёрные палитры заменены (см. описание модуля)"""
+    chr_by_hash, rooms = load(rooms_path)
+    if gen_path:
+        gchr, gen = load(gen_path)
         by_area = {}
         for rm in rooms.values():
             if not rm['dark']: by_area.setdefault(rm['area'], rm)
@@ -86,6 +84,14 @@ def main():
         if rm.get('fixed') and not rom.byte(5, rm['rec']) & 0x80 and rm['area'] in look_by_area:
             lk = look_by_area[rm['area']]
             rm.update(chr=lk['chr'], sets=lk['sets'], pal=lk['pal'], ctrl=lk['ctrl'])
+    return chr_by_hash, rooms
+
+
+def main():
+    rom = Rom(sys.argv[1])
+    out = sys.argv[3]
+    scale = float(sys.argv[4]) if len(sys.argv) > 4 else 0.25
+    chr_by_hash, rooms = load_all(rom, sys.argv[2], sys.argv[5] if len(sys.argv) > 5 else None)
     W, H = int(256 * scale), int(192 * scale)
     big = Image.new('RGB', (24 * W + 2 * 24, 24 * H + 2 * 24), (16, 16, 16))
     dr = ImageDraw.Draw(big)
