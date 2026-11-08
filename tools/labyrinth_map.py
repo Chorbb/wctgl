@@ -27,6 +27,7 @@ def load(path):
             x, y, area, rec, h, ctrl = int(p[1]), int(p[2]), int(p[3]), int(p[4], 16), p[5], int(p[6], 16)
             cells = bytes.fromhex(p[7]); sets = bytes.fromhex(p[8]); pal = bytes.fromhex(p[9])
             if len(cells) != 192: continue
+            if len(set(cells)) < 3: continue           # снято до постройки (пустая сетка)
             rooms[(x, y)] = dict(area=area, rec=rec, chr=h, ctrl=ctrl, cells=cells, sets=sets, pal=pal)
     return chr_by_hash, rooms
 

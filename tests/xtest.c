@@ -510,8 +510,9 @@ int main(int argc, char **argv) {
                 int len = (b0 & 0x0F) + 1;
                 uint16_t rec = p;
                 p = (uint16_t)(p + len);
-                if (b0 & 0x80) continue;                      /* комнаты нет */
-                int area = len >= 3 ? (prg5[rec + 2 - 0x8000] & 0x0F) : 0;
+                if (b0 == 0x80) continue;                     /* комнаты нет */
+                /* зона: у записей с битом 7 — 0 (центр), иначе младшие 4 бита байта 2 (по записи) */
+                int area = (b0 & 0x80) || len < 3 ? 0 : (prg5[rec + 2 - 0x8000] & 0x0F);
                 w = *base; w.cpu.ctx = &w; w.frame_end_fn = NULL;
                 w.ram[0x52] = (uint8_t)x; w.ram[0x53] = (uint8_t)y; w.ram[0xA4] = 4; w.ram[0x50] = (uint8_t)area;
                 w.bank = 5; w.ram[0x04] = 5;
