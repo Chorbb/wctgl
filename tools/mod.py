@@ -12,6 +12,18 @@
     байт <банк> <адрес> <значение> [...]         любые байты (адрес процессора, $ — шестнадцатеричный)
     проход <X> <Y> <С|З|В|Ю> [закрыть]            лабиринт: открыть/закрыть проход из комнаты X,Y
                                                  (N/W/E/S тоже можно); правится и соседняя комната
+    узор <X> <Y> <картинка.png>                  свой узор блоков комнаты: PNG 16×9, пиксель = клетка
+    узор <X> <Y>                                 то же текстом: следующие 9 строк по 16 символов
+
+Свой узор кладётся в память модов ядра (банк 64, см. core/custom.h) — без ограничений формата
+игры. Цвета картинки и символы текста:
+    чёрный   .  пусто (клетка шаблона комнаты)
+    красный  к  красно-белый конус           $09
+    жёлтый   б  оливковый ступенчатый блок   $01
+    синий    г  голубой шар                  $05
+    серый    р  решётка                      $0A
+    пурпур   ш  красный шар                  $04
+Цвет берётся ближайший из таблицы; слишком непохожий — ошибка с координатами пикселя.
 
 Правка попадает в копию ROM в памяти; исходный файл не меняется. Если правка задевает
 исполняемый код (по build/coverage.txt), инструмент предупреждает и пишет в патч строку
@@ -48,6 +60,40 @@ def code_bytes(cov_path, rom):
     return out
 
 
+BLOCKS = [  # (символ, цвет картинки, значение клетки)
+    ('.', (0, 0, 0), 0x00), ('к', (255, 0, 0), 0x09), ('б', (255, 255, 0), 0x01),
+    ('г', (0, 0, 255), 0x05), ('р', (128, 128, 128), 0x0A), ('ш', (255, 0, 255), 0x04),
+]
+MOD_BANK, PAT_SLOTS = 64, 80
+
+
+def pattern_from_png(path):
+    from PIL import Image
+    im = Image.open(path).convert('RGB')
+    assert im.size == (16, 9), 'картинка должна быть 16×9 пикселей, а она %d×%d' % im.size
+    out, bad = [], []
+    for y in range(9):
+        for x in range(16):
+            p = im.getpixel((x, y))
+            d, v = min((sum((a - b) ** 2 for a, b in zip(p, c)), v) for _, c, v in BLOCKS)
+            if d > 3 * 80 ** 2: bad.append('%d,%d #%02X%02X%02X' % (x, y, *p))
+            out.append(v)
+    assert not bad, 'непонятные цвета пикселей (x,y): ' + ', '.join(bad[:8])
+    return out
+
+
+def pattern_from_text(rows):
+    sym = {c: v for c, _, v in BLOCKS}
+    assert len(rows) == 9, 'нужно 9 строк узора'
+    out = []
+    for r in rows:
+        assert len(r) == 16, 'в строке узора должно быть 16 символов: «%s»' % r
+        for ch in r:
+            assert ch in sym, 'непонятный символ «%s» в узоре' % ch
+            out.append(sym[ch])
+    return out
+
+
 def main():
     rom_path, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
     rom = Rom(rom_path)
@@ -56,7 +102,10 @@ def main():
     code = code_bytes(os.path.join(os.path.dirname(dst) or '.', 'coverage.txt'), rom) or \
         code_bytes('build/coverage.txt', rom)
     patches, errors, touches_code = [], [], []
-    for ln, raw in enumerate(open(src, encoding='utf-8'), 1):
+    src_lines = list(enumerate(open(src, encoding='utf-8'), 1))
+    room_pat = {}                                  # (x, y) → 144 клетки
+    it = iter(src_lines)
+    for ln, raw in it:
         line = raw.split('#', 1)[0].strip()
         if not line: continue
         w = line.split()
@@ -91,6 +140,22 @@ def main():
                     v = rm['raw'][1] & ~b if close else rm['raw'][1] | b
                     rm['raw'][1] = v
                     patches.append((5, rm['addr'] + 1, [v], raw.strip()))
+            elif cmd in ('узор', 'pattern'):
+                x, y = num(a[0]), num(a[1])
+                assert 0 <= x < 24 and 0 <= y < 24, 'комната вне карты 24×24'
+                rm = rooms[(x, y)]
+                assert rm['exists'] and not rm['special'], 'в %d,%d нет обычной комнаты' % (x, y)
+                if len(a) > 2:
+                    png = a[2] if os.path.isabs(a[2]) else os.path.join(os.path.dirname(src), a[2])
+                    room_pat[(x, y)] = pattern_from_png(png)
+                else:
+                    rows = []
+                    while len(rows) < 9:
+                        _, r2 = next(it)
+                        r2 = r2.split('#', 1)[0].strip()
+                        if r2: rows.append(r2)
+                    room_pat[(x, y)] = pattern_from_text(rows)
+                assert len(room_pat) <= PAT_SLOTS, 'своих узоров не больше %d' % PAT_SLOTS
             elif cmd in ('байт', 'byte'):
                 bank, addr = num(a[0]), num(a[1])
                 patches.append((bank, addr, [num(x) & 255 for x in a[2:]], raw.strip()))
@@ -98,7 +163,13 @@ def main():
                 errors.append('строка %d: неизвестная команда «%s»' % (ln, w[0]))
         except (AssertionError, IndexError, ValueError) as e:
             errors.append('строка %d: %s — %s' % (ln, raw.strip(), e or 'неверные числа'))
+    for n, ((x, y), cells) in enumerate(sorted(room_pat.items()), 1):
+        patches.append((MOD_BANK, 24 * y + x, [n], 'узор %d %d → свой узор %d' % (x, y, n)))
+        patches.append((MOD_BANK, 0x400 + 144 * (n - 1), cells, 'клетки своего узора %d' % n))
     for bank, addr, data, text in patches:
+        if bank == MOD_BANK:
+            if not (0 <= addr and addr + len(data) <= 0x4000): errors.append('%s: вне памяти модов' % text)
+            continue
         base = 0xC000 if bank == 7 else 0x8000
         if not (base <= addr and addr + len(data) <= base + 0x4000):
             errors.append('%s: адрес $%04X вне банка %d' % (text, addr, bank))
@@ -112,8 +183,11 @@ def main():
         if touches_code:
             f.write('translation off\n')
         for bank, addr, data, text in patches:
-            old = [rom.byte(bank, addr + k) for k in range(len(data))]
-            f.write('# %s  (было %s)\n' % (text, ' '.join('%02X' % x for x in old)))
+            if bank == MOD_BANK:
+                f.write('# %s  (память модов ядра)\n' % text)
+            else:
+                old = [rom.byte(bank, addr + k) for k in range(len(data))]
+                f.write('# %s  (было %s)\n' % (text, ' '.join('%02X' % x for x in old)))
             f.write('%d %04X %s\n' % (bank, addr, ' '.join('%02X' % x for x in data)))
     print('правок: %d → %s' % (len(patches), dst))
     for t in touches_code:

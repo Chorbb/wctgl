@@ -409,7 +409,9 @@ int main(int argc, char **argv) {
             char *q = line; int bank = (int)strtol(q, &q, 10); int addr = (int)strtol(q, &q, 16);
             long off = 16 + (long)bank * 0x4000 + (addr - (bank == nbank - 1 ? 0xC000 : 0x8000));
             for (;;) { char *q2; long v = strtol(q, &q2, 16); if (q2 == q) break; q = q2;
-                       if (off >= 16 && off < rom_size) rom[off] = (uint8_t)v; off++; np++; }
+                       if (bank == MOD_BANK) { if (addr >= 0 && addr < MOD_MEM_SIZE) custom_mod_mem[addr] = (uint8_t)v; addr++; }
+                       else if (off >= 16 && off < rom_size) rom[off] = (uint8_t)v;
+                       off++; np++; }
         }
         fclose(pf);
         fprintf(stderr, "patch: %d bytes\n", np);

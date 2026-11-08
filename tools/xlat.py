@@ -64,6 +64,7 @@ class Gen:
     def __init__(self, rom, coverage):
         self.rom = rom
         self.cov = coverage            # set of (bank, addr)
+        self.hooks = set()             # точки для модов: (банк, адрес) → XHOOK
         self.nonproc = set()           # адреса переходников (не обычных процедур)
         self.loop_entry = None
         self.cur_entry = None
@@ -412,6 +413,8 @@ class Gen:
             note = operand_note(d[0], d[1], d[3])
             lines.append(('L_%04X: /* %s %s%s */' if pure_bail else 'L_%04X: XT(0x%04X); /* %s %s%s */')
                          % ((pc, d[0], d[1], note) if pure_bail else (pc, pc, d[0], d[1], note)))
+            if (self.bank_of(pc, bank), pc) in self.hooks:
+                lines.append('    XHOOK(%s);' % h4(pc))
             for c in code:
                 lines.append('    ' + c)
         if body:
@@ -441,11 +444,13 @@ def load_rts_targets(path):
 def main():
     rom = Rom(sys.argv[1])
     cov = load_coverage(sys.argv[2])
-    want, far_entries = [], []
+    want, far_entries, hooks = [], [], set()
     for line in open(sys.argv[3]):
         line = line.split('#')[0].split()
         if len(line) == 2 and line[0] == 'far':
             far_entries.append(int(line[1], 16))
+        elif len(line) == 3 and line[0] == 'hook':
+            hooks.add((int(line[1]), int(line[2], 16)))
         elif len(line) >= 3:
             want.append((int(line[0]), int(line[1], 16), line[2], line[3] if len(line) > 3 else None))
     closure = '--closure' in sys.argv
@@ -457,6 +462,7 @@ def main():
                 exclude.add((int(b), int(ad, 16)))
 
     g = Gen(rom, cov)
+    g.hooks = hooks
     g.far = set(far_entries)
     g.loop_heads = {e for b, e, k, nm in want if k == 'loop'}
     # входы, куда попадали через RTS не как возврат из JSR: обработчики из таблиц переходов

@@ -1,5 +1,6 @@
 /* custom.c — новые враги (см. custom.h). */
 #include "custom.h"
+#include "rt.h"
 
 /* ---------------------------------------------------------------- помощники */
 
@@ -94,6 +95,40 @@ static void sine_flyer(Nes *n) {
     custom_rts(n);
 }
 
+/* ---------------------------------------------------------------- память модов */
+uint8_t custom_mod_mem[MOD_MEM_SIZE];
+
+void custom_mod_clear(void) { memset(custom_mod_mem, 0, sizeof custom_mod_mem); }
+
+int custom_mod_write(int addr, const uint8_t *data, int len) {
+    if (addr < 0 || len < 0 || addr + len > MOD_MEM_SIZE) return -3;
+    for (int i = 0; i < len; i++) custom_mod_mem[addr + i] = data[i];
+    return 0;
+}
+
+/* ---------------------------------------------------------------- свой узор комнаты
+ * Банк 5 $8243 — начало наложения узора при постройке комнаты ($8155). Если у комнаты
+ * ($52, $53) свой узор, кладём его клетки в сетку $740 и продолжаем с $82DD (после узора
+ * игры), как будто у записи нет бита 4. Ловим только тогда — иначе перевод идёт как был. */
+#define PAT_ADDR   0x8243
+#define PAT_AFTER  0x82DD
+
+static int room_pattern_of(Nes *n) {
+    if (n->ram[0x30] & 0x20) return 0;                 /* внутренность особой комнаты */
+    int x = n->ram[0x52], y = n->ram[0x53];
+    if (x >= 24 || y >= 24) return 0;
+    int k = custom_mod_mem[24 * y + x];
+    return (k >= 1 && k <= 80) ? k : 0;
+}
+
+static void room_pattern(Nes *n) {
+    int k = room_pattern_of(n);
+    const uint8_t *p = custom_mod_mem + 0x400 + 144 * (k - 1);
+    for (int i = 0; i < 144; i++) if (p[i]) n->ram[0x760 + i] = p[i];
+    tick(n, 400);
+    n->cpu.pc = PAT_AFTER;
+}
+
 const CustomInfo custom_table[] = {
     { 6, SINE_ADDR, sine_flyer, "sine_flyer",
       "наследник типа 66: синусоида вниз, выстрел раз в 64 кадра" },
@@ -101,6 +136,7 @@ const CustomInfo custom_table[] = {
 const int custom_count = (int)(sizeof custom_table / sizeof custom_table[0]);
 
 static nes_hook_fn custom_lookup(Nes *n, uint16_t addr) {
+    if (addr == PAT_ADDR && (n->bank & 7) == 5) return room_pattern_of(n) ? room_pattern : 0;
 #ifdef CUSTOM_DEBUG
     if (addr == 0xBFD8) { extern int printf(const char *, ...); printf("lookup BFD8 bank %d\n", n->bank); }
 #endif

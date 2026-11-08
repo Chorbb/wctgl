@@ -87,6 +87,10 @@ static inline int xlat_stop(Nes *n) {
 #define XBR(...)  if (xlat_branch(n, __VA_ARGS__)) return
 #define XIOX(...) if (xlat_io(n, __VA_ARGS__)) return
 #define XCHK(at)  if (xlat_check(n, (uint16_t)(at))) return
+/* точка для модов (routines.txt: «hook банк адрес»): если ядро повесило туда свою процедуру
+ * (custom_find), отдаём управление эмулятору — он вызовет её; иначе перевод идёт дальше */
+#define XHOOK(at) do { if (n->custom_find && n->custom_find(n, (at))) { xlat_bail_to(n, (at)); return; } } while (0)
+
 /* трассировка (для поиска расхождений): перед каждой инструкцией, как у эмулятора */
 #ifdef XLAT_NOTRACE
 #define XT(at) ((void)0)

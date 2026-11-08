@@ -37,6 +37,7 @@ int tgl_load_rom(const uint8_t *rom, int size) {
         nes.frame_end_fn = on_frame_end;
         xlat_register_all(&nes);    /* переведённые процедуры (если ядро собрано с ними) */
         custom_install(&nes);       /* новые враги модов */
+        custom_mod_clear();         /* память модов — заново, моды кладутся после загрузки */
         nes.use_hooks = 1;
         nes.audio_rate = audio_rate;
         nes_reset(&nes);
@@ -96,6 +97,7 @@ int tgl_audio_read(int16_t *out, int max) {
  * данных действуют сразу; правки самого кода через перевод не действуют (см. tools/mod.py). */
 int tgl_patch_rom(int bank, int addr, const uint8_t *data, int len) {
     if (!loaded || !data || len <= 0) return -1;
+    if (bank == MOD_BANK) return custom_mod_write(addr, data, len);     /* память модов */
     int banks = nes.prg_banks;
     if (bank < 0 || bank >= banks) return -2;
     int base = (bank == banks - 1) ? 0xC000 : 0x8000;
@@ -122,6 +124,7 @@ static uint32_t prg_sum(void) {
     uint32_t h = 2166136261u;                      /* FNV-1a */
     int n = nes.prg_banks * 0x4000;
     for (int i = 0; i < n; i++) { h ^= nes.prg[i]; h *= 16777619u; }
+    for (int i = 0; i < MOD_MEM_SIZE; i++) { h ^= custom_mod_mem[i]; h *= 16777619u; }
     return h;
 }
 
