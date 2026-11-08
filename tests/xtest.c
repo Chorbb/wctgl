@@ -147,6 +147,30 @@ static void trace_stat(Nes *n) {
         }
         if (watch >= 0) return;
     }
+    if (getenv("XT_ROOM")) {
+        /* комната лабиринта построена: возвраты из $8003 (банк 5) в $EBC3/$EE83/$EF00/$FF71.
+         * Пишем: "M" x y зона | адрес записи комнаты | 192 клетки $740-$7FF | наборы $460-$477 |
+         * палитра 32 | CHR (8 КБ, только когда изменилась — "K") */
+        if (pc == 0xEBC3 || pc == 0xEE83 || pc == 0xEF00 || pc == 0xFF71) {
+            static uint32_t last_chr_hash; uint32_t h = 2166136261u;
+            for (int i = 0; i < 8192; i++) { h ^= n->chr[i]; h *= 16777619u; }
+            if (h != last_chr_hash) {
+                fprintf(stat_out, "K %08X ", h);
+                for (int i = 0; i < 8192; i++) fprintf(stat_out, "%02X", n->chr[i]);
+                fprintf(stat_out, "\n");
+                last_chr_hash = h;
+            }
+            fprintf(stat_out, "M %d %d %d %04X %08X %02X ", n->ram[0x52], n->ram[0x53], n->ram[0x50],
+                    n->ram[0xE4] | (n->ram[0xE5] << 8), h, n->ppu.ctrl);
+            for (int i = 0; i < 192; i++) fprintf(stat_out, "%02X", n->ram[0x740 + i]);
+            fprintf(stat_out, " ");
+            for (int i = 0; i < 24; i++) fprintf(stat_out, "%02X", n->ram[0x460 + i]);
+            fprintf(stat_out, " ");
+            for (int i = 0; i < 32; i++) fprintf(stat_out, "%02X", n->ppu.pal[i]);
+            fprintf(stat_out, " %04X\n", pc);
+        }
+        return;
+    }
     if (getenv("XT_CORR")) {
         /* поток данных коридора: начало ($E58F, указатель $18) и каждая команда ($E6F0) */
         if (pc == 0xE58F)
@@ -461,6 +485,62 @@ int main(int argc, char **argv) {
         }
         fclose(o);
         printf("statedump: %ld states\n", recs);
+        return 0;
+    }
+
+    if (!strcmp(mode, "roomgen")) {
+        /* все комнаты лабиринта, построенные процедурами самой игры: от снимка XT_SNAPS=a
+         * (игрок в лабиринте) для каждой клетки сетки 24×24 с записью комнаты — X/Y в $52/$53,
+         * зона из записи, затем $8071 (записи комнаты и соседей), $8121 (флаги), $8155 (постройка),
+         * банк 5. Вывод — строки M, как у XT_ROOM (графика — та, что в снимке). */
+        if (!use_snaps) { fprintf(stderr, "roomgen: нужен snap.bin\n"); return 2; }
+        cur_snap = &sl.snaps[s_from];
+        Nes *base = make_nes_into(NULL, rom, rom_size);
+        base->use_hooks = 0;
+        for (int f = 0; f < frames; f++) nes_run_frame(base);
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/roomgen.txt", "w");
+        static Nes w;
+        /* записи комнат: банк 5, $8A6E, 24×24 подряд, длина = (байт0 & $0F) + 1 */
+        const uint8_t *prg5 = base->prg + 5 * 0x4000;
+        uint16_t p = 0x8A6E;
+        int made = 0;
+        for (int y = 0; y < 24; y++)
+            for (int x = 0; x < 24; x++) {
+                uint8_t b0 = prg5[p - 0x8000];
+                int len = (b0 & 0x0F) + 1;
+                uint16_t rec = p;
+                p = (uint16_t)(p + len);
+                if (b0 & 0x80) continue;                      /* комнаты нет */
+                int area = len >= 3 ? (prg5[rec + 2 - 0x8000] & 0x0F) : 0;
+                w = *base; w.cpu.ctx = &w; w.frame_end_fn = NULL;
+                w.ram[0x52] = (uint8_t)x; w.ram[0x53] = (uint8_t)y; w.ram[0xA4] = 4; w.ram[0x50] = (uint8_t)area;
+                w.bank = 5; w.ram[0x04] = 5;
+                memset(w.ram + 0x740, 0, 192);
+                static const uint16_t steps[3] = { 0x8071, 0x8121, 0x8158 };   /* $8155 без JSR $C045 (выключение экрана и ожидание кадров) */
+                int ok = 1;
+                for (int k = 0; k < 3 && ok; k++) {
+                    uint8_t s0 = w.cpu.s;
+                    uint16_t ret = 0xFFF0;                     /* возврат в «никуда» — ловим по адресу */
+                    w.ram[0x100 | w.cpu.s] = (uint8_t)((ret - 1) >> 8); w.cpu.s--;
+                    w.ram[0x100 | w.cpu.s] = (uint8_t)(ret - 1); w.cpu.s--;
+                    w.cpu.pc = steps[k];
+                    long guard = 0;
+                    while (!(w.cpu.pc == ret && w.cpu.s == s0) && guard++ < 300000 && !w.cpu.jammed) nes_step(&w);
+                    if (w.cpu.pc != ret) { ok = 0; fprintf(o, "# step %04X stuck\n", steps[k]); }
+                    w.bank = 5;
+                }
+                if (!ok) { fprintf(o, "X %d %d pc %04X bank %d\n", x, y, w.cpu.pc, w.bank); continue; }
+                fprintf(o, "M %d %d %d %04X 00000000 %02X ", x, y, area, rec, w.ppu.ctrl);
+                for (int i = 0; i < 192; i++) fprintf(o, "%02X", w.ram[0x740 + i]);
+                fprintf(o, " ");
+                for (int i = 0; i < 24; i++) fprintf(o, "%02X", w.ram[0x460 + i]);
+                fprintf(o, " ");
+                for (int i = 0; i < 32; i++) fprintf(o, "%02X", w.ppu.pal[i]);
+                fprintf(o, " GEN\n");
+                made++;
+            }
+        fclose(o);
+        printf("roomgen: %d rooms, map data ends at $%04X\n", made, p);
         return 0;
     }
 
