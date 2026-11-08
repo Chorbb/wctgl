@@ -539,6 +539,40 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (!strcmp(mode, "mapgen")) {
+        /* карта лабиринта, как её рисует игра: от снимка XT_SNAPS=a вызвать $8805 банка 5 (часть
+         * экрана паузы: перебор записей комнат → биты $0150, вывод в видеопамять) до возврата.
+         * Вывод: биты карты по рядам (как пишет $891F), 24×24 клетки → «#»/«.». */
+        if (!use_snaps) { fprintf(stderr, "mapgen: нужен snap.bin\n"); return 2; }
+        cur_snap = &sl.snaps[s_from];
+        Nes *w = make_nes_into(NULL, rom, rom_size);
+        xlat_register_all(w); w->use_hooks = getenv("XT_EMU") ? 0 : 1;
+        w->frame_end_fn = NULL;
+        static uint8_t bits[24][12];
+        w->bank = 5; w->ram[0x04] = 5; w->ram[0xA5] = 0;
+        uint8_t s0 = w->cpu.s; uint16_t ret = 0xFFF0;
+        w->ram[0x100 | w->cpu.s] = (uint8_t)((ret - 1) >> 8); w->cpu.s--;
+        w->ram[0x100 | w->cpu.s] = (uint8_t)(ret - 1); w->cpu.s--;
+        w->cpu.pc = 0x8809;
+        long guard = 0; int row = 0;
+        while (!(w->cpu.pc == ret && w->cpu.s == s0) && guard++ < 20000000 && !w->cpu.jammed) {
+            if (w->cpu.pc == 0x88DF && (w->bank & 7) == 5 && row < 12) { memcpy(bits[row], w->ram + 0x150, 12); row++; }
+            nes_step(w);
+        }
+        {   uint32_t h = 2166136261u;
+            for (int i = 0; i < 2048; i++) { h ^= w->ppu.nt[i]; h *= 16777619u; }
+            printf("mapgen: %s, рядов %d, видеопамять экранов %08X\n", w->cpu.pc == ret ? "вернулась" : "НЕ вернулась", row, h); }
+        for (int y = 0; y < 24; y++) {
+            for (int x = 0; x < 24; x++) {
+                uint8_t b = bits[y / 2][x / 2];
+                int bit = (y & 1 ? 4 : 1) << (x & 1);
+                putchar(b & bit ? '#' : '.');
+            }
+            putchar('\n');
+        }
+        return 0;
+    }
+
     if (!strcmp(mode, "walk")) {
         /* пройти своими кнопками от снимка XT_SNAPS=a: XT_WALK_FROM=кадр начала, XT_WALK=сценарий;
          * перевод включён. Вывод: «P кадр X Y» при смене комнаты, картинки XT_PPM/XT_PPMF. */
@@ -556,6 +590,7 @@ int main(int argc, char **argv) {
         for (int f = 0; f < frames; f++) {
             nes_run_frame(m);
             const uint8_t *r = m->fe_ram;
+            if (getenv("XT_PADS") && (m->pad_state & 0x0C)) printf("pad %d %02X  экран ctrl %02X\n", f, m->pad_state, m->ppu.ctrl);
             if (r[0x52] != px || r[0x53] != py) { px = r[0x52]; py = r[0x53]; printf("P %d %d %d  игрок %d,%d\n", f, px, py, r[0x530], r[0x518]); }
             for (int k = 5; k < 24; k++) {
                 if (prev_t[k] && r[0x500 + k] == prev_t[k] && r[0x590 + k] < prev_hp[k]) {

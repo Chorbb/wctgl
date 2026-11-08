@@ -78,3 +78,7 @@ clean:
 	rm -rf $(BUILD)
 
 .PHONY: all test clean dll coverage gen xlat
+
+# игра через интерфейс ядра (как в Godot): build/apitest rom snap.bin снимок кадров читы
+$(BUILD)/apitest: tests/apitest.c core/tgl_api.c core/xlat.c $(BUILD)/gen/xlat_gen.c $(CORE) core/*.h
+	$(CC) $(CFLAGS) -Wno-unused-label -Wno-misleading-indentation -Icore -o $@ tests/apitest.c core/xlat.c $(BUILD)/gen/xlat_gen.c $(CORE)

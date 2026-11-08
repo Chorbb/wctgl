@@ -184,6 +184,33 @@ static void room_records(Nes *n) {
     custom_rts(n);
 }
 
+/* Карта лабиринта (экран карты, банк 5 $882D-$88D5): игра перебирает записи подряд, указатель
+ * $1A/$1B, клетка — $15 (X), $14 (Y). В $8853 (начало клетки, LDY #0) для клетки со своей
+ * записью подменяем указатель на неё (окно $6000), в $88B9 (переход к следующей записи,
+ * LDY #0) возвращаем указатель ROM — длину перехода игра берёт из записи ROM. */
+#define MAP_CELL  0x8853
+#define MAP_NEXT  0x88B9
+static uint16_t map_saved; static int map_has;
+
+static int map_cell_here(Nes *n) { return room_rec(n->ram[0x15], n->ram[0x14]) != 0; }
+static void ldy0(Nes *n, uint16_t next) {
+    n->cpu.y = 0;
+    n->cpu.p = (uint8_t)((n->cpu.p & ~0x80) | 0x02);
+    tick(n, 2);
+    n->cpu.pc = next;
+}
+static void map_cell(Nes *n) {
+    int k = room_rec(n->ram[0x15], n->ram[0x14]);
+    map_saved = (uint16_t)(n->ram[0x1A] | (n->ram[0x1B] << 8)); map_has = 1;
+    uint16_t a = (uint16_t)(0x6000 + 16 * (k - 1));
+    n->ram[0x1A] = (uint8_t)a; n->ram[0x1B] = (uint8_t)(a >> 8);
+    ldy0(n, MAP_CELL + 2);
+}
+static void map_next(Nes *n) {
+    n->ram[0x1A] = (uint8_t)map_saved; n->ram[0x1B] = (uint8_t)(map_saved >> 8); map_has = 0;
+    ldy0(n, MAP_NEXT + 2);
+}
+
 const CustomInfo custom_table[] = {
     { 6, SINE_ADDR, sine_flyer, "sine_flyer",
       "наследник типа 66: синусоида вниз, выстрел раз в 64 кадра" },
@@ -194,6 +221,8 @@ static nes_hook_fn custom_lookup(Nes *n, uint16_t addr) {
     if (addr == PAT_ADDR && (n->bank & 7) == 5) return room_pattern_of(n) ? room_pattern : 0;
     if (addr == ROOMS_ADDR && (n->bank & 7) == 5) return rooms_here(n) ? room_records : 0;
     if (addr == HIT_ADDR) return one_hit_here(n) ? one_hit : 0;
+    if (addr == MAP_CELL && (n->bank & 7) == 5) return map_cell_here(n) ? map_cell : 0;
+    if (addr == MAP_NEXT && (n->bank & 7) == 5) return map_has ? map_next : 0;
 #ifdef CUSTOM_DEBUG
     if (addr == 0xBFD8) { extern int printf(const char *, ...); printf("lookup BFD8 bank %d\n", n->bank); }
 #endif
