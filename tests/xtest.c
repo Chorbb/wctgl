@@ -539,6 +539,73 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (!strcmp(mode, "tiles")) {
+        /* какие плитки 8×8 игра показывает (для арта): по отрезкам XT_SNAPS, каждый 2-й кадр —
+         * фон (оба экрана памяти фона с палитрами из атрибутов) и спрайты (OAM). Плитка = её 16
+         * байт CHR + 4 цвета палитры. Вывод (текст): «T вид chr32hex палитра8hex сколько» —
+         * вид b (фон) или s (спрайт); плюс XT_SHOTS=папка: картинки кадров каждые 300 кадров. */
+        if (!use_snaps) { fprintf(stderr, "tiles: нужен snap.bin\n"); return 2; }
+        enum { MAXT = 20000 };
+        static uint8_t key[MAXT][21]; static uint32_t cnt[MAXT]; int nk = 0;
+        Nes *m = NULL;
+        for (int si = s_from; si < s_to; si += s_step) {
+            cur_snap = &sl.snaps[si];
+            m = make_nes_into(m, rom, rom_size);
+            xlat_register_all(m); m->use_hooks = 1;
+            int segf = frames;
+            if (cur_snap->frame + 1 + (uint32_t)segf > sl.frames) segf = (int)(sl.frames - cur_snap->frame - 1);
+            for (int f = 0; f < segf; f++) {
+                nes_run_frame(m);
+                if (getenv("XT_SHOTS") && f % 300 == 150) {
+                    char path[512]; snprintf(path, sizeof path, "%s/s%03d_f%04d.ppm", getenv("XT_SHOTS"), si, f);
+                    FILE *po = fopen(path, "wb"); fprintf(po, "P6 256 240 255\n");
+                    for (int i = 0; i < 256 * 240; i++) { uint32_t c = NES_PALETTE[m->shown[i] & 63];
+                        fputc((c >> 16) & 255, po); fputc((c >> 8) & 255, po); fputc(c & 255, po); }
+                    fclose(po);
+                }
+                if (f & 1) continue;
+                if (getenv("XT_CORRIDOR") && (m->fe_ram[0x7F] != 4 || m->fe_ram[0x51] != atoi(getenv("XT_CORRIDOR")))) continue;
+                const Ppu *pp = &m->ppu;
+                uint8_t k[21];
+                for (int scr = 0; scr < 2; scr++)
+                    for (int ty = 0; ty < 30; ty++) for (int tx = 0; tx < 32; tx++) {
+                        const uint8_t *ntp = pp->nt + scr * 1024;
+                        int t = ntp[ty * 32 + tx];
+                        int at = ntp[960 + (ty / 4) * 8 + tx / 4] >> (((ty & 2) << 1) | (tx & 2)) & 3;
+                        int base = (pp->ctrl & 0x10) ? 0x1000 : 0;
+                        k[0] = 'b'; memcpy(k + 1, m->chr + base + t * 16, 16);
+                        k[17] = pp->pal[0]; for (int c = 1; c < 4; c++) k[17 + c] = pp->pal[at * 4 + c];
+                        int i; for (i = 0; i < nk; i++) if (!memcmp(key[i], k, 21)) break;
+                        if (i == nk && nk < MAXT) { memcpy(key[nk], k, 21); nk++; }
+                        if (i < MAXT) cnt[i]++;
+                    }
+                for (int o = 0; o < 64; o++) {
+                    const uint8_t *e = pp->oam + o * 4;
+                    if (e[0] >= 0xEF) continue;
+                    int tall = pp->ctrl & 0x20, pal = e[2] & 3;
+                    for (int h = 0; h < (tall ? 2 : 1); h++) {
+                        int addr = tall ? ((e[1] & 1) * 0x1000 + ((e[1] & 0xFE) + h) * 16) : (((pp->ctrl & 8) ? 0x1000 : 0) + e[1] * 16);
+                        k[0] = 's'; memcpy(k + 1, m->chr + addr, 16);
+                        k[17] = 0; for (int c = 1; c < 4; c++) k[17 + c] = pp->pal[16 + pal * 4 + c];
+                        int i; for (i = 0; i < nk; i++) if (!memcmp(key[i], k, 21)) break;
+                        if (i == nk && nk < MAXT) { memcpy(key[nk], k, 21); nk++; }
+                        if (i < MAXT) cnt[i]++;
+                    }
+                }
+            }
+        }
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/tiles.txt", "w");
+        for (int i = 0; i < nk; i++) {
+            fprintf(o, "T %c ", key[i][0]);
+            for (int j = 1; j < 17; j++) fprintf(o, "%02X", key[i][j]);
+            fprintf(o, " "); for (int j = 17; j < 21; j++) fprintf(o, "%02X", key[i][j]);
+            fprintf(o, " %u\n", cnt[i]);
+        }
+        fclose(o);
+        printf("tiles: %d разных плиток\n", nk);
+        return 0;
+    }
+
     if (!strcmp(mode, "mapgen")) {
         /* карта лабиринта, как её рисует игра: от снимка XT_SNAPS=a вызвать $8805 банка 5 (часть
          * экрана паузы: перебор записей комнат → биты $0150, вывод в видеопамять) до возврата.
