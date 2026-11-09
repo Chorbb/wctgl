@@ -16,7 +16,7 @@ ram  $0049 1 life            проверено   текущая жизнь (н�
 ram  $004A 1 attack          гипотеза    сила атаки (ROM Detectives)
 ram  $004B 1 shield          гипотеза    щит (ROM Detectives)
 ram  $004C 2 chips           проверено   чипы, 16 бит (младший, старший)
-ram  $004E 2 chips_max       гипотеза    предел чипов, 16 бит (ROM Detectives)
+ram  $004E 2 chips_max       проверено   предел чипов, 16 бит (по нему обрезает $FCF2 банка 7)
 ram  $003E 1 shot_count      проверено   число SHOT на панели
 ram  $0050 1 area            проверено   номер зоны (AREA на панели)
 ram  $0052 1 map_x           проверено   X в лабиринте (X на панели)
