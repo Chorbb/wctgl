@@ -78,7 +78,7 @@ static void walk_parse(const char *s) {
         while (*s == ' ') s++;
         uint8_t b = 0;
         for (; *s && (*s < '0' || *s > '9'); s++) {
-            switch (*s) { case 'A': b |= 1; break; case 'B': b |= 2; break; case 'S': b |= 8; break;
+            switch (*s) { case 'A': b |= 1; break; case 'B': b |= 2; break; case 'S': b |= 8; break; case 'E': b |= 4; break;
                           case 'U': b |= 16; break; case 'D': b |= 32; break; case 'L': b |= 64; break; case 'R': b |= 128; break; }
         }
         int k = 0; while (*s >= '0' && *s <= '9') k = k * 10 + (*s++ - '0');
@@ -618,6 +618,10 @@ int main(int argc, char **argv) {
                 }
                 fclose(po);
             }
+        }
+        if (getenv("XT_DUMP")) {               /* память в конце: XT_DUMP=адрес:длина (hex) */
+            unsigned da = 0, dl = 0; sscanf(getenv("XT_DUMP"), "%x:%x", &da, &dl);
+            printf("D %04X", da); for (unsigned i = 0; i < dl; i++) printf(" %02X", m->fe_ram[(da + i) & 0x7FF]); printf("\n");
         }
         printf("walk: конец, комната %d,%d, игрок %d,%d, очки ", m->fe_ram[0x52], m->fe_ram[0x53], m->fe_ram[0x530], m->fe_ram[0x518]);
         for (int i = 0; i < 7; i++) printf("%d", m->fe_ram[0x170 + i]);

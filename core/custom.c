@@ -101,6 +101,9 @@ static int cheat_flags;
 void custom_cheats(Nes *n, int flags) {
     cheat_flags = flags;
     if ((flags & 1) && n->ram[0x47]) { n->ram[0x48] = n->ram[0x47]; n->ram[0x49] = n->ram[0x47]; }
+    /* все спецоружия, уровень 3: уровни по 2 бита на оружие 0-10 в $04AC-$04AE (читает $E498
+     * банка 7, подбор оружия прибавляет 1 — банк 2 $86CD); биты 6-7 $04AE — другое, не трогаем */
+    if (flags & 4) { n->ram[0x4AC] = 0xFF; n->ram[0x4AD] = 0xFF; n->ram[0x4AE] |= 0x3F; }
 }
 
 /* Убивать с одного попадания: банк 7 $D31C — объект X получает урон объекта Y
