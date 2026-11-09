@@ -61,6 +61,32 @@ static Nes *make_nes(const uint8_t *rom, long size) { return make_nes_into(NULL,
  * несколько букв подряд — вместе: RB30); до начала сценария — кнопки записи */
 static uint8_t walk_pad[100000]; static int walk_len, walk_from;
 static int walk_cheats;
+/* sprites: кто пишет в буфер спрайтов $0200-$02FF (адрес команды, X, Y) */
+static Nes *spw_n; static cpu_write_fn spw_wr; static cpu_read_fn spw_rd; static uint16_t spw_ring[2048]; static int spw_ri;
+static uint8_t spw_owner[256], spw_wrote[256]; static uint16_t spw_tag[256]; static uint16_t spw_curtag; static uint16_t spw_pc[256];
+static int spw_cur = 255; static uint16_t spw_lastpc;   /* объект, чей кадр спрайта ($0548,X) прочитан последним — его рисует $CC31 */
+static void spw_write(void *ctx, uint16_t a, uint8_t v) {
+    if (a >= 0x200 && a < 0x300) {
+        spw_owner[a - 0x200] = (uint8_t)spw_cur; spw_tag[a - 0x200] = spw_curtag;
+        const uint8_t *st = spw_n->ram + 0x100; uint8_t sp = spw_n->cpu.s;
+        /* адрес возврата на 2 уровня выше — кто вызывал вывод */
+        (void)st; (void)sp; spw_pc[a - 0x200] = spw_n->cpu.pc; spw_wrote[a - 0x200] = 1;
+        if (spw_cur == 255 && getenv("XT_TRAIL") && (a & 3) == 1) {
+            static int shown; if (shown++ < 2) { printf("след:"); for (int i = 0; i < 2048; i++) { uint16_t q = spw_ring[(spw_ri + i) & 2047]; if (q == 0xCC31 || q == 0xCC44 || q == 0xCC46 || q == 0xCBFC || q == 0xCC20 || (q >= 0xCC00 && q < 0xCC20) || q < 0xCB00 || q > 0xCF00) printf(" %04X", q); } printf("\n"); }
+        }
+    }
+    spw_wr(ctx, a, v);
+}
+static long spw_nread, spw_hit, spw_orphan, spw_vis, spw_stale;
+static uint8_t spw_read(void *ctx, uint16_t a) {
+    spw_nread++;
+    if (a == spw_n->cpu.pc && a >= 0xC000) { spw_ring[spw_ri++ & 2047] = a; }
+    if (a >= 0x548 && a < 0x548 + 255 && spw_n->cpu.pc == 0xCC34) { spw_cur = a - 0x548; spw_lastpc = spw_n->cpu.pc; spw_hit++; spw_curtag = spw_n->ram[a & 0x7FF]; }
+    /* $C093 — JMP $CC34: ещё один кадр спрайта объекта X, номер кадра — в A */
+    if (a == 0xC093 && spw_n->cpu.pc == 0xC093) { spw_cur = spw_n->cpu.x; spw_curtag = spw_n->cpu.a; }
+    if (a == 0xCC44 && (spw_n->cpu.pc == 0xCC44 || spw_n->cpu.pc == 0xCC45)) spw_cur = 255;   /* конец кадра объекта */
+    return spw_rd(ctx, a);
+}
 static Nes *hpw_n; static cpu_write_fn hpw_wr;
 static void hpw_write(void *ctx, uint16_t a, uint8_t v) {
     if (a >= 0x590 && a < 0x5A8 && v < hpw_n->ram[a] && a > 0x594)
@@ -539,6 +565,79 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (!strcmp(mode, "sprites")) {
+        /* кадры спрайтов объектов (для арта): эмулятором по отрезкам XT_SNAPS (XT_CORRIDOR=n —
+         * только этот коридор), каждый кадр игры: спрайты буфера $0200 по хозяевам (объект,
+         * чей номер кадра спрайта $0548,X прочитан последним перед записью — так рисует $CC31).
+         * Вывод: «F тип кадр_спрайта dx dy атрибут CHR(32 байта: две плитки 8×16) палитра…» —
+         * одна строка на спрайт; строки одного объекта в кадре подряд, перед ними «G тип кадр n».
+         * Сводит одинаковые наборы (уникальные строки G+F с числом повторов «N»). */
+        if (!use_snaps) return 2;
+        Nes *m = NULL;
+        typedef struct { char *txt; uint32_t n; } Grp;
+        static Grp g[20000]; int ng = 0;
+        int corr = getenv("XT_CORRIDOR") ? atoi(getenv("XT_CORRIDOR")) : -1;
+        for (int si = s_from; si < s_to; si += s_step) {
+            cur_snap = &sl.snaps[si];
+            m = make_nes_into(m, rom, rom_size); m->use_hooks = 0;
+            spw_n = m; spw_wr = m->cpu.write; m->cpu.write = spw_write; spw_rd = m->cpu.read; m->cpu.read = spw_read;
+            int segf = frames;
+            if (cur_snap->frame + 1 + (uint32_t)segf > sl.frames) segf = (int)(sl.frames - cur_snap->frame - 1);
+            static uint8_t prev_oam[256];
+            for (int f = 0; f < segf; f++) {
+                memset(spw_owner, 0xFF, 256); memset(spw_wrote, 0, 256);
+                nes_run_frame(m);
+                const uint8_t *r = m->ram;
+                if (corr >= 0 && (r[0x7F] != 4 || r[0x51] != corr)) continue;
+                if (!memcmp(prev_oam, r + 0x200, 256)) continue;      /* пауза: буфер не менялся */
+                memcpy(prev_oam, r + 0x200, 256);
+                int tall = m->ppu.ctrl & 0x20;
+                for (int o = 1; o < 64; o++) if (!spw_wrote[o * 4 + 1] && r[0x200 + o * 4] < 0xEF) spw_stale++;
+                for (int o = 1; o < 64; o++) if (spw_wrote[o * 4 + 1] && spw_owner[o * 4 + 1] == 0xFF && r[0x200 + o * 4] < 0xEF) {
+                    spw_orphan++;
+                    if (getenv("XT_ORPHANS") && f % 100 == 0) printf("сирота отрезок %d кадр %d: %d,%d тайл %02X атр %02X pc %04X\n", si, f, r[0x203 + o * 4], r[0x200 + o * 4], r[0x201 + o * 4], r[0x202 + o * 4], spw_pc[o * 4 + 1]);
+                }
+                spw_vis += 64;
+                for (int ob = 0; ob < 255; ob++) for (int ti = 0; ti < 64; ti++) {
+                    /* ti — спрайт, чей «тег кадра» берём; одинаковые теги — вместе, по первому */
+                    if (spw_owner[ti * 4 + 1] != ob || !spw_wrote[ti * 4 + 1]) continue;
+                    uint16_t tag = spw_tag[ti * 4 + 1]; int first = 1;
+                    for (int q = 0; q < ti; q++) if (spw_owner[q * 4 + 1] == ob && spw_wrote[q * 4 + 1] && spw_tag[q * 4 + 1] == tag) first = 0;
+                    if (!first) continue;
+                    char buf[8192]; int len = 0, ns = 0;
+                    int ox = ob < 24 ? r[0x530 + ob] : r[0x85], oy = ob < 24 ? r[0x518 + ob] : r[0x84];
+                    for (int o = 0; o < 64; o++) {
+                        if (spw_owner[o * 4 + 1] != ob || !spw_wrote[o * 4 + 1] || spw_tag[o * 4 + 1] != tag) continue;
+                        const uint8_t *e = r + 0x200 + o * 4;
+                        if (e[0] >= 0xEF) continue;
+                        len += snprintf(buf + len, sizeof buf - len, "F %d %d %02X ", (int)e[3] - ox, (int)e[0] - oy, e[2] & 0xE3);
+                        for (int h = 0; h < 2; h++) {
+                            int addr = tall ? ((e[1] & 1) * 0x1000 + ((e[1] & 0xFE) + h) * 16) : (((m->ppu.ctrl & 8) ? 0x1000 : 0) + e[1] * 16);
+                            if (!tall && h) { len += snprintf(buf + len, sizeof buf - len, "-"); break; }
+                            for (int k = 0; k < 16; k++) len += snprintf(buf + len, sizeof buf - len, "%02X", m->chr[addr + k]);
+                        }
+                        int pal = e[2] & 3;
+                        len += snprintf(buf + len, sizeof buf - len, " %02X%02X%02X\n", m->ppu.pal[16 + pal * 4 + 1], m->ppu.pal[16 + pal * 4 + 2], m->ppu.pal[16 + pal * 4 + 3]);
+                        ns++;
+                        if (len > 7000) break;
+                    }
+                    if (!ns) continue;
+                    char head[64]; int hl = snprintf(head, sizeof head, "G %02X %04X %d %s\n", ob < 24 ? (r[0x500 + ob] & 0x7F) : 0x100 + ob - 24, tag, ns, tall ? "8x16" : "8x8");
+                    char *txt = malloc(hl + len + 1); memcpy(txt, head, hl); memcpy(txt + hl, buf, len); txt[hl + len] = 0;
+                    int i; for (i = 0; i < ng; i++) if (!strcmp(g[i].txt, txt)) break;
+                    if (i < ng) { g[i].n++; free(txt); }
+                    else if (ng < 20000) { g[ng].txt = txt; g[ng].n = 1; ng++; }
+                }
+            }
+            m->cpu.write = spw_wr; m->cpu.read = spw_rd;
+        }
+        FILE *o = fopen(argc > 5 ? argv[5] : "build/sprites.txt", "w");
+        for (int i = 0; i < ng; i++) fprintf(o, "N %u\n%s", g[i].n, g[i].txt);
+        fclose(o);
+        printf("sprites: %d разных кадров объектов (кадр объекта прочитан при $CC31: %ld; спрайтов без хозяина: %ld, не переписанных в кадре: %ld)\n", ng, spw_hit, spw_orphan, spw_stale);
+        return 0;
+    }
+
     if (!strcmp(mode, "tiles")) {
         /* какие плитки 8×8 игра показывает (для арта): по отрезкам XT_SNAPS, каждый 2-й кадр —
          * фон (оба экрана памяти фона с палитрами из атрибутов) и спрайты (OAM). Плитка = её 16
@@ -546,6 +645,7 @@ int main(int argc, char **argv) {
          * вид b (фон) или s (спрайт); плюс XT_SHOTS=папка: картинки кадров каждые 300 кадров. */
         if (!use_snaps) { fprintf(stderr, "tiles: нужен snap.bin\n"); return 2; }
         enum { MAXT = 20000 };
+        static uint8_t ck[6000][68]; static uint32_t cc[6000]; int ncell = 0;
         static uint8_t key[MAXT][21]; static uint32_t cnt[MAXT]; int nk = 0;
         Nes *m = NULL;
         for (int si = s_from; si < s_to; si += s_step) {
@@ -579,6 +679,19 @@ int main(int argc, char **argv) {
                         if (i == nk && nk < MAXT) { memcpy(key[nk], k, 21); nk++; }
                         if (i < MAXT) cnt[i]++;
                     }
+                if (getenv("XT_CELLS")) {          /* клетки фона 16×16 (2×2 плитки, одна палитра) */
+                    int base = (pp->ctrl & 0x10) ? 0x1000 : 0;
+                    for (int scr = 0; scr < 2; scr++) for (int ty = 0; ty < 30; ty += 2) for (int tx = 0; tx < 32; tx += 2) {
+                        const uint8_t *ntp = pp->nt + scr * 1024;
+                        int at = ntp[960 + (ty / 4) * 8 + tx / 4] >> (((ty & 2) << 1) | (tx & 2)) & 3;
+                        uint8_t q[68];
+                        for (int j = 0; j < 4; j++) memcpy(q + j * 16, m->chr + base + ntp[(ty + j / 2) * 32 + tx + (j & 1)] * 16, 16);
+                        q[64] = pp->pal[0]; for (int c = 1; c < 4; c++) q[64 + c] = pp->pal[at * 4 + c];
+                        int i; for (i = 0; i < ncell; i++) if (!memcmp(ck[i], q, 68)) break;
+                        if (i == ncell && ncell < 6000) { memcpy(ck[ncell], q, 68); ncell++; }
+                        if (i < 6000) cc[i]++;
+                    }
+                }
                 for (int o = 0; o < 64; o++) {
                     const uint8_t *e = pp->oam + o * 4;
                     if (e[0] >= 0xEF) continue;
@@ -593,6 +706,13 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+        }
+        if (getenv("XT_CELLS")) {
+            FILE *cf = fopen(getenv("XT_CELLS"), "w");
+            for (int i = 0; i < ncell; i++) { fprintf(cf, "C "); for (int j = 0; j < 64; j++) fprintf(cf, "%02X", ck[i][j]);
+                fprintf(cf, " %02X%02X%02X%02X %u\n", ck[i][64], ck[i][65], ck[i][66], ck[i][67], cc[i]); }
+            fclose(cf);
+            printf("клеток фона 16×16: %d\n", ncell);
         }
         FILE *o = fopen(argc > 5 ? argv[5] : "build/tiles.txt", "w");
         for (int i = 0; i < nk; i++) {
