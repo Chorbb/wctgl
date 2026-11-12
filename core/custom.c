@@ -260,6 +260,7 @@ static uint8_t art_pool[ART_POOL];
 static uint32_t art_used;
 static uint8_t art_obj[24][4];          /* тип, кадр, X, Y — в момент копирования спрайтов */
 static int16_t art_of[24];              /* какая картинка у объекта или -1 */
+static int art_clip = 240;              /* рисовать только выше этой строки: панель внизу экрана */
 
 void custom_art_clear(void) { custom_art_count = 0; art_used = 0; for (int i = 0; i < 24; i++) art_of[i] = -1; }
 
@@ -278,6 +279,9 @@ int custom_art_add(int type, int frame, int ax, int ay, int w, int h, const uint
 
 void custom_art_dma(Nes *n) {
     if (!custom_art_count) return;
+    /* спрайт 0 — метка, где игра переключает экран на панель (Y=$BF → строка 192): ниже него
+     * игровое поле кончается, спрайты игры туда не попадают — и арт обрезаем по ней */
+    art_clip = n->ppu.oam[0] < 0xEF ? n->ppu.oam[0] + 1 : 240;
     for (int k = 0; k < 24; k++) {
         art_of[k] = -1;
         uint8_t t = n->ram[0x500 + k];
@@ -309,7 +313,7 @@ void custom_art_draw(uint8_t *rgba) {
         int x0 = art_obj[k][2] + a->ax, y0 = art_obj[k][3] + a->ay + 1;
         const uint8_t *src = art_pool + a->off;
         for (int y = 0; y < a->h; y++) {
-            int sy = y0 + y; if (sy < 0 || sy >= 240) continue;
+            int sy = y0 + y; if (sy < 0 || sy >= art_clip) continue;
             for (int x = 0; x < a->w; x++) {
                 int sx = x0 + x; if (sx < 0 || sx >= 256) continue;
                 const uint8_t *p = src + (y * a->w + x) * 4;
