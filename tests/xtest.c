@@ -61,6 +61,23 @@ static Nes *make_nes(const uint8_t *rom, long size) { return make_nes_into(NULL,
  * несколько букв подряд — вместе: RB30); до начала сценария — кнопки записи */
 static uint8_t walk_pad[100000]; static int walk_len, walk_from;
 static int walk_cheats;
+/* XT_ART=art.raw (tools/art_cut.py) — арт мода в ядро */
+static void load_art(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) { fprintf(stderr, "нет %s\n", path); exit(2); }
+    custom_art_clear();
+    uint8_t h2[2]; if (fread(h2, 1, 2, f) != 2) exit(2);
+    int n = h2[0] | h2[1] << 8;
+    for (int i = 0; i < n; i++) {
+        uint8_t hd[9]; if (fread(hd, 1, 9, f) != 9) exit(2);
+        int w = hd[4] | hd[5] << 8, h = hd[6] | hd[7] << 8, nh = hd[8];
+        int8_t hide[64]; if (fread(hide, 1, (size_t)nh * 2, f) != (size_t)nh * 2) exit(2);
+        uint8_t *px = malloc((size_t)w * h * 4); if (fread(px, 1, (size_t)w * h * 4, f) != (size_t)w * h * 4) exit(2);
+        int r = custom_art_add(hd[0], hd[1], (int8_t)hd[2], (int8_t)hd[3], w, h, px, hide, nh);
+        printf("арт: тип %02X кадр %02X %d×%d → %d\n", hd[0], hd[1], w, h, r);
+        free(px);
+    }
+    fclose(f);
+}
 /* sprites: кто пишет в буфер спрайтов $0200-$02FF (адрес команды, X, Y) */
 static Nes *spw_n; static cpu_write_fn spw_wr; static cpu_read_fn spw_rd; static uint16_t spw_ring[2048]; static int spw_ri;
 static uint8_t spw_owner[256], spw_wrote[256]; static uint16_t spw_tag[256]; static uint16_t spw_curtag; static uint16_t spw_pc[256];
@@ -772,6 +789,7 @@ int main(int argc, char **argv) {
         Nes *m = make_nes_into(NULL, rom, rom_size);
         xlat_register_all(m); m->use_hooks = getenv("XT_EMU") ? 0 : 1;
         m->frame_end_fn = walk_input;
+        if (getenv("XT_ART")) load_art(getenv("XT_ART"));
         if (getenv("XT_HPW")) { hpw_n = m; hpw_wr = m->cpu.write; m->cpu.write = hpw_write; m->use_hooks = 0; }
         int px = -1, py = -1; uint8_t prev_t[24] = {0}, prev_hp[24] = {0}; int hits[24] = {0};
         for (int f = 0; f < frames; f++) {
@@ -799,11 +817,18 @@ int main(int argc, char **argv) {
                 char path[512]; snprintf(path, sizeof path, "%s/w_f%04d.ppm", getenv("XT_PPM"), f);
                 FILE *po = fopen(path, "wb");
                 fprintf(po, "P6 256 240 255\n");
+                static uint8_t rgba[256 * 240 * 4];
                 for (int i = 0; i < 256 * 240; i++) {
                     uint32_t c = NES_PALETTE[m->shown[i] & 63];
-                    fputc((c >> 16) & 255, po); fputc((c >> 8) & 255, po); fputc(c & 255, po);
+                    rgba[i * 4] = (uint8_t)(c >> 16); rgba[i * 4 + 1] = (uint8_t)(c >> 8); rgba[i * 4 + 2] = (uint8_t)c; rgba[i * 4 + 3] = 255;
                 }
+                custom_art_draw(rgba);                        /* как tgl_get_frame_rgba */
+                for (int i = 0; i < 256 * 240; i++) { fputc(rgba[i * 4], po); fputc(rgba[i * 4 + 1], po); fputc(rgba[i * 4 + 2], po); }
                 fclose(po);
+            }
+            if (getenv("XT_FIND")) {                           /* XT_FIND=тип: кадры, где он есть */
+                int ft = (int)strtol(getenv("XT_FIND"), NULL, 16);
+                for (int k = 0; k < 24; k++) if ((r[0x500 + k] & 0x7F) == ft && r[0x500 + k]) { printf("найден %d слот %d кадр %02X в %d,%d\n", f, k, r[0x548 + k], r[0x530 + k], r[0x518 + k]); break; }
             }
         }
         if (getenv("XT_DUMP")) {               /* память в конце: XT_DUMP=адрес:длина (hex) */

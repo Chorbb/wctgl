@@ -282,6 +282,7 @@ static void dma_oam(Nes *n) {
         cpu_end_cycle(&n->cpu);
     }
     n->stall_cycles += n->cpu.cycles - c0;
+    custom_art_dma(n);                         /* арт мода: спрятать заменённые спрайты */
 }
 
 static uint8_t bus_read(void *ctx, uint16_t a) {

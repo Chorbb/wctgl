@@ -58,4 +58,10 @@ TGL_API int tgl_build_info(char *buf, int cap);
  * Возвращает прежние флаги. */
 TGL_API int tgl_cheats(int flags);
 
+/* Арт мода: своя картинка (w×h RGBA) вместо спрайтов кадра объекта (тип, кадр спрайта $0548);
+ * рисуется в X+ax, Y+ay+1 объекта, спрайты NES со смещениями hide (пары dx,dy) убираются.
+ * Подробно — core/custom.h. */
+TGL_API int tgl_art_add(int type, int frame, int ax, int ay, int w, int h, const uint8_t *rgba, const int8_t *hide, int nhide);
+TGL_API void tgl_art_clear(void);
+
 #endif

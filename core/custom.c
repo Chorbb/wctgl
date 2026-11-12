@@ -244,3 +244,79 @@ static nes_hook_fn custom_lookup(Nes *n, uint16_t addr) {
 }
 
 void custom_install(Nes *n) { n->custom_find = custom_lookup; }
+
+/* ---------------------------------------------------------------- арт мода (см. custom.h) */
+typedef struct {
+    uint8_t type, frame;
+    int8_t ax, ay;
+    uint16_t w, h;
+    uint32_t off;                       /* в art_pool, w*h*4 */
+    uint8_t nhide;
+    int8_t hide[ART_HIDE_MAX][2];
+} ArtFrame;
+static ArtFrame art[ART_MAX];
+int custom_art_count;
+static uint8_t art_pool[ART_POOL];
+static uint32_t art_used;
+static uint8_t art_obj[24][4];          /* тип, кадр, X, Y — в момент копирования спрайтов */
+static int16_t art_of[24];              /* какая картинка у объекта или -1 */
+
+void custom_art_clear(void) { custom_art_count = 0; art_used = 0; for (int i = 0; i < 24; i++) art_of[i] = -1; }
+
+int custom_art_add(int type, int frame, int ax, int ay, int w, int h, const uint8_t *rgba, const int8_t *hide, int nhide) {
+    if (custom_art_count >= ART_MAX || w <= 0 || h <= 0 || w > 256 || h > 240 || nhide < 0 || nhide > ART_HIDE_MAX) return -1;
+    uint32_t sz = (uint32_t)(w * h * 4);
+    if (art_used + sz > ART_POOL) return -2;
+    ArtFrame *a = &art[custom_art_count];
+    a->type = (uint8_t)type; a->frame = (uint8_t)frame; a->ax = (int8_t)ax; a->ay = (int8_t)ay;
+    a->w = (uint16_t)w; a->h = (uint16_t)h; a->off = art_used; a->nhide = (uint8_t)nhide;
+    for (uint32_t i = 0; i < sz; i++) art_pool[art_used + i] = rgba[i];
+    for (int i = 0; i < nhide; i++) { a->hide[i][0] = hide[2 * i]; a->hide[i][1] = hide[2 * i + 1]; }
+    art_used += sz;
+    return custom_art_count++;
+}
+
+void custom_art_dma(Nes *n) {
+    if (!custom_art_count) return;
+    for (int k = 0; k < 24; k++) {
+        art_of[k] = -1;
+        uint8_t t = n->ram[0x500 + k];
+        art_obj[k][0] = t & 0x7F; art_obj[k][1] = n->ram[0x548 + k];
+        art_obj[k][2] = n->ram[0x530 + k]; art_obj[k][3] = n->ram[0x518 + k];
+        if (!t) continue;
+        for (int i = 0; i < custom_art_count; i++)
+            if (art[i].type == art_obj[k][0] && art[i].frame == art_obj[k][1]) { art_of[k] = (int16_t)i; break; }
+        if (art_of[k] < 0) continue;
+        const ArtFrame *a = &art[art_of[k]];
+        int found = 0;
+        for (int o = 1; o < 64; o++) {                 /* спрайт 0 не трогаем */
+            uint8_t *e = n->ppu.oam + o * 4;
+            if (e[0] >= 0xEF) continue;
+            int dx = (int8_t)(uint8_t)(e[3] - art_obj[k][2]), dy = (int8_t)(uint8_t)(e[0] - art_obj[k][3]);
+            for (int h = 0; h < a->nhide; h++)
+                if (a->hide[h][0] == dx && a->hide[h][1] == dy) { e[0] = 0xF8; found++; break; }
+        }
+        /* игра этот кадр не рисовала (экран паузы, мерцание, объект за краем) — и мы не рисуем */
+        if (!found) art_of[k] = -1;
+    }
+}
+
+void custom_art_draw(uint8_t *rgba) {
+    if (!custom_art_count) return;
+    for (int k = 0; k < 24; k++) {
+        if (art_of[k] < 0) continue;
+        const ArtFrame *a = &art[art_of[k]];
+        int x0 = art_obj[k][2] + a->ax, y0 = art_obj[k][3] + a->ay + 1;
+        const uint8_t *src = art_pool + a->off;
+        for (int y = 0; y < a->h; y++) {
+            int sy = y0 + y; if (sy < 0 || sy >= 240) continue;
+            for (int x = 0; x < a->w; x++) {
+                int sx = x0 + x; if (sx < 0 || sx >= 256) continue;
+                const uint8_t *p = src + (y * a->w + x) * 4;
+                if (p[3] < 128) continue;
+                uint8_t *d = rgba + (sy * 256 + sx) * 4;
+                d[0] = p[0]; d[1] = p[1]; d[2] = p[2]; d[3] = 255;
+            }
+        }
+    }
+}

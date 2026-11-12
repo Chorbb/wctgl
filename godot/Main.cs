@@ -6,7 +6,7 @@
 //
 // Управление:  стрелки/WASD — крестовина, Z — B (огонь), X — A (доп. оружие),
 //              Enter — Start, Shift — Select, F5 — Reset, M — звук вкл/выкл,
-//              F7 — перечитать моды и начать заново, Esc — выход.
+//              F7 — перечитать моды и арт и начать заново, T — арт мода вкл/выкл, Esc — выход.
 // Сохранения:  F2 — сохранить, F4 — загрузить, F3 — следующая ячейка (1-3).
 // Читы:        F9 — бессмертие вкл/выкл, K — убивать с одного попадания вкл/выкл,
 //              O — все спецоружия уровня 3 и бесконечные чипы (предел не меньше 5000)
@@ -38,6 +38,8 @@ public partial class Main : Node2D
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_size();
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_save(byte[] buf, int cap);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_state_load(byte[] buf, int len);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern int tgl_art_add(int type, int frame, int ax, int ay, int w, int h, byte[] rgba, sbyte[] hide, int nhide);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] static extern void tgl_art_clear();
 
     // Где искать ROM по умолчанию. Если файла нет, откроется окно выбора, путь запомнится.
     const string DefaultRomPath = "C:/TGL_claude/rom/Guardian Legend, The (USA).nes";
@@ -124,7 +126,7 @@ public partial class Main : Node2D
         string build;
         try { var b = new byte[256]; int n = tgl_build_info(b, b.Length); build = System.Text.Encoding.UTF8.GetString(b, 0, n); }
         catch (Exception) { build = "ядро старой сборки (нет tgl_build_info) — обновите native/tglcore.dll"; }
-        ShowMessage(build + "\n" + ApplyMods());
+        ShowMessage(build + "\n" + ApplyMods() + (_artOn ? ApplyArt() : "Арт мода выключен (T)\n"));
         _msgTimer = 5.0;
         tgl_reset();
         _running = true;
@@ -215,6 +217,47 @@ public partial class Main : Node2D
         return report.ToString();
     }
 
+    // Арт мода: папки art/<имя>/ с art.txt (tools/art_cut.py) и картинками. Строка art.txt:
+    // «тип кадр ax ay файл.png dx,dy …» (тип и кадр — hex). Картинка заменяет спрайты этого кадра
+    // объекта; ядро прячет спрайты NES со смещениями dx,dy и рисует картинку в X+ax, Y+ay+1.
+    bool _artOn = true;
+    string ApplyArt()
+    {
+        tgl_art_clear();
+        string root = ProjectSettings.GlobalizePath("res://art");
+        if (!System.IO.Directory.Exists(root)) return "";
+        var report = new System.Text.StringBuilder();
+        foreach (var list in System.IO.Directory.GetFiles(root, "art.txt", System.IO.SearchOption.AllDirectories))
+        {
+            int ok = 0, bad = 0;
+            string dir = System.IO.Path.GetDirectoryName(list);
+            foreach (var raw in System.IO.File.ReadAllLines(list))
+            {
+                string line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("#")) continue;
+                var w = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                try
+                {
+                    var img = new Image();
+                    if (img.LoadPngFromBuffer(System.IO.File.ReadAllBytes(System.IO.Path.Combine(dir, w[4]))) != Error.Ok) { bad++; continue; }
+                    img.Convert(Image.Format.Rgba8);
+                    var hide = new sbyte[(w.Length - 5) * 2];
+                    for (int i = 5; i < w.Length; i++)
+                    {
+                        var xy = w[i].Split(',');
+                        hide[(i - 5) * 2] = sbyte.Parse(xy[0]); hide[(i - 5) * 2 + 1] = sbyte.Parse(xy[1]);
+                    }
+                    int r = tgl_art_add(Convert.ToInt32(w[0], 16), Convert.ToInt32(w[1], 16), int.Parse(w[2]), int.Parse(w[3]),
+                                        img.GetWidth(), img.GetHeight(), img.GetData(), hide, hide.Length / 2);
+                    if (r >= 0) ok++; else bad++;
+                }
+                catch (Exception) { bad++; }
+            }
+            report.Append($"Арт {System.IO.Path.GetFileName(dir)}: кадров {ok}" + (bad > 0 ? $", ошибок {bad}" : "") + "\n");
+        }
+        return report.ToString();
+    }
+
     void AskForRom()
     {
         ShowMessage("Выберите файл ROM The Guardian Legend (.nes)");
@@ -284,6 +327,16 @@ public partial class Main : Node2D
             }
             if (k.Keycode == Key.F2 && _running) SaveState();
             if (k.Keycode == Key.F4 && _running) LoadState();
+            if (k.Keycode == Key.T && _running)
+            {
+                _artOn = !_artOn;
+                if (_artOn)
+                {
+                    string r = ApplyArt().Trim();
+                    Flash(r.Length > 0 ? r : "Арт мода: нет папки art");
+                }
+                else { tgl_art_clear(); Flash("Арт мода выключен (T) — оригинальная графика"); }
+            }
             if (k.Keycode == Key.F7 && _running)
             {
                 _running = false;                       // ROM заново (без старых правок) + моды

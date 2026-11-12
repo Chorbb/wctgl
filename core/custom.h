@@ -56,4 +56,20 @@ int custom_mod_write(int addr, const uint8_t *data, int len);
  * спецоружия уровня 3 и чипы всегда на пределе (оружие после выключения остаётся). */
 void custom_cheats(Nes *n, int flags);
 
+/* ---- Арт мода: свои картинки объектов (любого размера) вместо их спрайтов NES ----
+ * Картинка привязана к (тип объекта, номер кадра спрайта $0548): в каждом копировании
+ * спрайтов ($4014) ядро запоминает объекты (тип, кадр, X, Y) и убирает из спрайтов приставки
+ * те, что лежат на месте спрайтов этого кадра (смещения dx,dy от X/Y объекта, как в буфере
+ * $0200; ячейку 0 не трогает — по ней игра делит экран). Картинку рисует tgl_get_frame_rgba
+ * поверх кадра в точке X+ax, Y+ay+1. На игру не влияет: правится только копия спрайтов в
+ * видеочипе, память игры та же. */
+#define ART_MAX      256
+#define ART_POOL     (512 * 1024)
+#define ART_HIDE_MAX 32
+int  custom_art_add(int type, int frame, int ax, int ay, int w, int h, const uint8_t *rgba, const int8_t *hide, int nhide);
+void custom_art_clear(void);
+extern int custom_art_count;
+void custom_art_dma(Nes *n);                  /* из копирования спрайтов */
+void custom_art_draw(uint8_t *rgba);          /* 256×240 RGBA */
+
 #endif

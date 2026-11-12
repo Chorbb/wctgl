@@ -38,6 +38,7 @@ int tgl_load_rom(const uint8_t *rom, int size) {
         xlat_register_all(&nes);    /* переведённые процедуры (если ядро собрано с ними) */
         custom_install(&nes);       /* новые враги модов */
         custom_mod_clear();         /* память модов — заново, моды кладутся после загрузки */
+        custom_art_clear();         /* арт модов тоже */
         nes.use_hooks = 1;
         nes.audio_rate = audio_rate;
         nes_reset(&nes);
@@ -65,7 +66,16 @@ void tgl_get_frame_rgba(uint8_t *out) {
         out[i * 4 + 2] = (uint8_t)c;
         out[i * 4 + 3] = 255;
     }
+    custom_art_draw(out);                         /* арт мода поверх (custom.c) */
 }
+
+/* Арт мода: картинка объекта (тип 0-127, кадр спрайта $0548) размером w×h RGBA, рисуется в
+ * X+ax, Y+ay+1 от объекта; hide — пары (dx, dy) спрайтов NES этого кадра, которые убрать.
+ * Возвращает номер (≥0) или <0 при ошибке. tgl_art_clear — убрать весь арт. */
+int tgl_art_add(int type, int frame, int ax, int ay, int w, int h, const uint8_t *rgba, const int8_t *hide, int nhide) {
+    return custom_art_add(type, frame, ax, ay, w, h, rgba, hide, nhide);
+}
+void tgl_art_clear(void) { custom_art_clear(); }
 
 int tgl_frame_count(void) { return (int)nes.frame; }
 
